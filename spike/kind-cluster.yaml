@@ -1,0 +1,7 @@
+name: k8s-mcp-server
+preloadImages:
+- "registry.gitlab.com/gitlab-ci-utils/curl-jq:3.2.1"
+- "nginx:1.29"
+- "golang:1.25-rc-alpine"
+- "busybox:1.37"
+- "quay.io/containers/kubernetes_mcp_server@sha256:cfe82e87eacc47cefd2b351af77f3b4ff90584b5cf4417e0c63a38ec93ed51b6"
