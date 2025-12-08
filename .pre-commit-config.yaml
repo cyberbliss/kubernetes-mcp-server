@@ -1,0 +1,48 @@
+# Pre-commit hooks configuration
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+#
+# Installation:
+#   brew install pre-commit  # or pip install pre-commit
+#   pre-commit install
+#
+# Usage:
+#   pre-commit run --all-files  # Run on all files
+#   make pre-commit-run         # Using Makefile
+#
+# See docs/PRE_COMMIT_HOOKS.md for detailed documentation
+# Pre-commit hooks configuration
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+#
+# Installation:
+#   brew install pre-commit  # or pip install pre-commit
+#   pre-commit install
+#
+# Usage:
+#   pre-commit run --all-files  # Run on all files
+#   make pre-commit-run         # Using Makefile
+#
+# See docs/PRE_COMMIT_HOOKS.md for detailed documentation
+repos:
+  # Basic file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  # Secret detection
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: |
+          (?x)^(
+              go.sum|
+              package-lock.json|
+              .*\.lock|
+              .*\.min\.js|
+              .*\.min\.css
+          )$

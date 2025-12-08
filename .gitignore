@@ -4,6 +4,9 @@ _output/
 .docusaurus/
 node_modules/
 
+# Pre-commit cache
+.pre-commit-cache/
+
 .npmrc
 kubernetes-mcp-server
 !charts/kubernetes-mcp-server

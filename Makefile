@@ -86,6 +86,53 @@ lint: golangci-lint ## Lint the code
 update-readme-tools: ## Update the README.md file with the latest toolsets
 	go run ./internal/tools/update-readme/main.go README.md
 
+##@ Pre-commit
+
+.PHONY: pre-commit-install
+pre-commit-install: ## Install pre-commit hooks
+	@if ! command -v pre-commit >/dev/null 2>&1; then \
+		echo "Installing pre-commit..."; \
+		if command -v brew >/dev/null 2>&1; then \
+			brew install pre-commit; \
+		else \
+			pip3 install --user pre-commit; \
+		fi \
+	fi
+	pre-commit install
+	@echo "Pre-commit hooks installed!"
+
+.PHONY: pre-commit-run
+pre-commit-run: ## Run pre-commit hooks on all files
+	pre-commit run --all-files
+
+.PHONY: pre-commit-update
+pre-commit-update: ## Update pre-commit hooks to latest versions
+	pre-commit autoupdate
+
+.PHONY: secrets-scan
+secrets-scan: ## Scan for secrets and update baseline
+	@if ! command -v detect-secrets >/dev/null 2>&1; then \
+		echo "Installing detect-secrets..."; \
+		if command -v brew >/dev/null 2>&1; then \
+			brew install detect-secrets; \
+		else \
+			pip3 install --user detect-secrets; \
+		fi \
+	fi
+	detect-secrets scan --baseline .secrets.baseline
+
+.PHONY: secrets-audit
+secrets-audit: ## Audit detected secrets
+	@if ! command -v detect-secrets >/dev/null 2>&1; then \
+		echo "Installing detect-secrets..."; \
+		if command -v brew >/dev/null 2>&1; then \
+			brew install detect-secrets; \
+		else \
+			pip3 install --user detect-secrets; \
+		fi \
+	fi
+	detect-secrets audit .secrets.baseline
+
 ##@ Tools
 
 .PHONY: tools
