@@ -1,0 +1,258 @@
+"""
+Test MCP Server Token Passthrough using Python MCP SDK
+
+This script tests programmatic access to the MCP server with ServiceAccount token passthrough.
+
+Usage:
+    uv run main.py
+
+Environment Variables:
+    TOKEN - ServiceAccount token to pass through
+    MCP_ENDPOINT - MCP server endpoint (default: http://localhost:9080)
+    NAMESPACE - Kubernetes namespace to test (default: default)
+"""
+
+import asyncio
+import os
+import sys
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+import httpx
+
+# ANSI colors
+RED = '\033[0;31m'
+GREEN = '\033[0;32m'
+YELLOW = '\033[1;33m'
+BLUE = '\033[0;34m'
+NC = '\033[0m'
+
+
+def print_test(name: str, expected: str):
+    """Print test header"""
+    print(f"\n{BLUE}{'━' * 50}{NC}")
+    print(f"{YELLOW}Test: {name}{NC}")
+    print(f"Expected: {expected}")
+    print()
+
+
+def print_result(passed: bool, message: str = ""):
+    """Print test result"""
+    if passed:
+        print(f"{GREEN}✅ PASSED{NC} {message}")
+    else:
+        print(f"{RED}❌ FAILED{NC} {message}")
+
+
+async def test_mcp_client():
+    """Test MCP server using Streamable HTTP mode"""
+    
+    mcp_endpoint = os.getenv("MCP_ENDPOINT", "http://localhost:9080")
+    token = os.getenv("TOKEN", "")
+    namespace = os.getenv("NAMESPACE", "default")
+    
+    if not token:
+        print(f"{RED}❌ TOKEN not set. Set TOKEN environment variable with ServiceAccount token.{NC}")
+        print(f"{YELLOW}Example: export TOKEN=$(kubectl create token default -n default --duration=10m){NC}")
+        return
+    
+    print(f"{BLUE}╔════════════════════════════════════════╗{NC}")
+    print(f"{BLUE}║  MCP Client Token Passthrough Test     ║{NC}")
+    print(f"{BLUE}╚════════════════════════════════════════╝{NC}")
+    print(f"\nMCP Endpoint: {YELLOW}{mcp_endpoint}{NC}")
+    print(f"Namespace: {YELLOW}{namespace}{NC}")
+    print(f"Token: {YELLOW}{token[:20]}...{NC}\n")
+    
+    try:
+        # Use httpx to make HTTP requests with Authorization header
+        headers = {"Authorization": f"Bearer {token}"}
+        
+        async with httpx.AsyncClient(base_url=mcp_endpoint, headers=headers, timeout=30.0) as http_client:
+            # We'll make direct HTTP POST requests since MCP SDK doesn't have native HTTP transport
+            
+            # Initialize
+            print_test("Initialize session", "Success - session initialized")
+            init_response = await http_client.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "python-client", "version": "1.0"}
+                    }
+                }
+            )
+            init_data = init_response.json()
+            if "error" in init_data:
+                print(f"Error: {init_data['error']}")
+                print_result(False, str(init_data['error']))
+                return
+            print_result(True, "Session initialized")
+            
+            # Send initialized notification
+            await http_client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "method": "notifications/initialized"}
+            )
+            
+            # Test 1: List available tools
+            print_test("List available tools", "Success - get list of Kubernetes tools")
+            try:
+                list_response = await http_client.post(
+                    "/mcp",
+                    json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+                )
+                list_data = list_response.json()
+                if "error" in list_data:
+                    print(f"Error: {list_data['error']}")
+                    print_result(False, str(list_data['error']))
+                else:
+                    tools = list_data.get("result", {}).get("tools", [])
+                    print(f"Found {len(tools)} tools:")
+                    for tool in tools[:5]:
+                        print(f"  - {tool['name']}: {tool.get('description', '')[:80]}...")
+                    if len(tools) > 5:
+                        print(f"  ... and {len(tools) - 5} more")
+                    print_result(True, f"Found {len(tools)} tools")
+            except Exception as e:
+                print(f"Error: {e}")
+                print_result(False, str(e))
+            
+            # Test 2: Call pods_list tool
+            print_test("List pods", "Success - list pods in namespace")
+            try:
+                pods_response = await http_client.post(
+                    "/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "pods_list",
+                            "arguments": {"namespace": namespace}
+                        }
+                    }
+                )
+                pods_data = pods_response.json()
+                if "error" in pods_data:
+                    print(f"Error: {pods_data['error']}")
+                    print_result(False, str(pods_data['error']))
+                else:
+                    result_content = str(pods_data.get("result", {}).get("content", []))
+                    print(f"Result: {result_content[:300]}...")
+                    print_result(True, "Successfully listed pods")
+            except Exception as e:
+                print(f"Error: {e}")
+                print_result(False, str(e))
+            
+            # Test 3: List configmaps
+            print_test("List configmaps", "Success - list configmaps in namespace")
+            try:
+                cm_response = await http_client.post(
+                    "/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 4,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "resources_list",
+                            "arguments": {
+                                "apiVersion": "v1",
+                                "kind": "ConfigMap",
+                                "namespace": namespace
+                            }
+                        }
+                    }
+                )
+                cm_data = cm_response.json()
+                if "error" in cm_data:
+                    print(f"Error: {cm_data['error']}")
+                    print_result(False, str(cm_data['error']))
+                else:
+                    result_content = str(cm_data.get("result", {}).get("content", []))
+                    print(f"Result: {result_content[:300]}...")
+                    print_result(True, "Successfully listed configmaps")
+            except Exception as e:
+                print(f"Error: {e}")
+                print_result(False, str(e))
+                # Initialize the session
+                await session.initialize()
+                
+                # Test 1: List available tools
+                print_test("List available tools", "Success - get list of Kubernetes tools")
+                try:
+                    tools = await session.list_tools()
+                    print(f"Found {len(tools.tools)} tools:")
+                    for tool in tools.tools[:5]:  # Show first 5
+                        print(f"  - {tool.name}: {tool.description[:80]}...")
+                    if len(tools.tools) > 5:
+                        print(f"  ... and {len(tools.tools) - 5} more")
+                    print_result(True, f"Found {len(tools.tools)} tools")
+                except Exception as e:
+                    print(f"Error: {e}")
+                    print_result(False, str(e))
+                
+                # Test 2: Call pods_list tool
+                print_test("List pods", "Success - list pods in namespace")
+                try:
+                    result = await session.call_tool(
+                        "pods_list",
+                        arguments={
+                            "namespace": namespace
+                        }
+                    )
+                    print(f"Result: {str(result.content)[:300]}...")
+                    print_result(True, "Successfully listed pods")
+                except Exception as e:
+                    print(f"Error: {e}")
+                    print_result(False, str(e))
+                
+                # Test 3: List configmaps
+                print_test("List configmaps", "Success - list configmaps in namespace")
+                try:
+                    result = await session.call_tool(
+                        "resources_list",
+                        arguments={
+                            "apiVersion": "v1",
+                            "kind": "ConfigMap",
+                            "namespace": namespace
+                        }
+                    )
+                    print(f"Result: {str(result.content)[:300]}...")
+                    print_result(True, "Successfully listed configmaps")
+                except Exception as e:
+                    print(f"Error: {e}")
+                    print_result(False, str(e))
+                
+    except Exception as e:
+        import traceback
+        print(f"{RED}Failed to connect to MCP server: {e}{NC}")
+        print(f"\n{YELLOW}Full error details:{NC}")
+        traceback.print_exc()
+        
+        # Try to extract nested exception
+        if hasattr(e, '__cause__') and e.__cause__:
+            print(f"\n{YELLOW}Caused by: {e.__cause__}{NC}")
+        if hasattr(e, 'exceptions'):
+            print(f"\n{YELLOW}Sub-exceptions:{NC}")
+            for sub_e in e.exceptions:
+                print(f"  - {sub_e}")
+        
+        print(f"\n{YELLOW}Make sure the MCP server is running at {mcp_endpoint}{NC}")
+        sys.exit(1)
+
+
+async def main():
+    """Run all tests"""
+    await test_mcp_client()
+    
+    print(f"\n{BLUE}╔════════════════════════════════════════╗{NC}")
+    print(f"\n{BLUE}╔════════════════════════════════════════╗{NC}")
+    print(f"{BLUE}║           Test Complete                ║{NC}")
+    print(f"{BLUE}╚════════════════════════════════════════╝{NC}\n")
+
+if __name__ == "__main__":
+    asyncio.run(main())
