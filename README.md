@@ -195,6 +195,7 @@ uvx kubernetes-mcp-server@latest --help
 | `--list-output`           | Output format for resource list operations (one of: yaml, table) (default "table")                                                                                                                                                                                                            |
 | `--read-only`             | If set, the MCP server will run in read-only mode, meaning it will not allow any write operations (create, update, delete) on the Kubernetes cluster. This is useful for debugging or inspecting the cluster without making changes.                                                          |
 | `--disable-destructive`   | If set, the MCP server will disable all destructive operations (delete, update, etc.) on the Kubernetes cluster. This is useful for debugging or inspecting the cluster without accidentally making changes. This option has no effect when `--read-only` is used.                            |
+| `--stateless`             | If set, the MCP server will run in stateless mode, disabling tool and prompt change notifications. This is useful for container deployments, load balancing, and serverless environments where maintaining client state is not desired. |
 | `--toolsets`              | Comma-separated list of toolsets to enable. Check the [🛠️ Tools and Functionalities](#tools-and-functionalities) section for more information.                                                                                                                                               |
 | `--disable-multi-cluster` | If set, the MCP server will disable multi-cluster support and will only use the current context from the kubeconfig file. This is useful if you want to restrict the MCP server to a single cluster.                                                                                          |
 
@@ -292,6 +293,97 @@ vim /etc/kubernetes-mcp-server/conf.d/99-local.toml
 pkill -HUP kubernetes-mcp-server
 ```
 
+### MCP Prompts
+
+1. The server supports MCP prompts for workflow templates. Define custom prompts in `config.toml`:
+
+```toml
+[[prompts]]
+name = "my-workflow"
+title = "my workflow"
+description = "Custom workflow"
+
+[[prompts.arguments]]
+name = "resource_name"
+required = true
+
+[[prompts.messages]]
+role = "user"
+content = "Help me with {{resource_name}}"
+```
+
+2. Toolset prompts implemented by toolset developers
+
+See docs/PROMPTS.md for detailed documentation.
+
+## 📊 MCP Logging <a id="mcp-logging"></a>
+
+The server supports the MCP logging capability, allowing clients to receive debugging information via structured log messages.
+
+### For Clients
+
+Clients can control log verbosity by sending a `logging/setLevel` request:
+
+```json
+{
+  "method": "logging/setLevel",
+  "params": { "level": "info" }
+}
+```
+
+**Available log levels** (in order of increasing severity):
+- `debug` - Detailed debugging information
+- `info` - General informational messages (default)
+- `notice` - Normal but significant events
+- `warning` - Warning messages
+- `error` - Error conditions
+- `critical` - Critical conditions
+- `alert` - Action must be taken immediately
+- `emergency` - System is unusable
+
+### For Developers
+
+Toolsets can optionally send debug information to clients using helper functions from the `mcplog` package:
+
+**Recommended approach for Kubernetes errors** (automatically categorizes errors and sends appropriate messages):
+
+```go
+import "github.com/containers/kubernetes-mcp-server/pkg/mcplog"
+
+// In your tool handler:
+ret, err := client.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+if err != nil {
+    mcplog.HandleK8sError(ctx, err, "pod access")
+    return api.NewToolCallResult("", fmt.Errorf("failed to get pod: %v", err)), nil
+}
+```
+
+**Manual logging** (for custom messages):
+
+```go
+import "github.com/containers/kubernetes-mcp-server/pkg/mcplog"
+
+// In your tool handler:
+if err != nil {
+    mcplog.SendMCPLog(ctx, "error", "Operation failed - check permissions")
+    return api.NewToolCallResult("", err)
+}
+```
+
+**Key Points:**
+- Logging is **optional** - toolsets work fine without sending MCP logs
+- Uses a dedicated named logger (`logger="mcp"`) for complete separation from server logs
+- Server logs (klog) remain detailed and unaffected
+- Client logs are high-level, helpful hints for debugging
+- Authentication failures send generic messages to clients (no security info leaked)
+- Sensitive data is automatically redacted with 28 pattern types:
+  - Generic fields (password, token, secret, api_key, etc.)
+  - Authorization headers (Bearer, Basic)
+  - Cloud credentials (AWS, GCP, Azure)
+  - API tokens (GitHub, GitLab, OpenAI, Anthropic)
+  - Cryptographic keys (JWT, SSH, PGP, RSA)
+  - Database connection strings (PostgreSQL, MySQL, MongoDB)
+
 ## 🛠️ Tools and Functionalities <a id="tools-and-functionalities"></a>
 
 The Kubernetes MCP server supports enabling or disabling specific groups of tools and functionalities (tools, resources, prompts, and so on) via the `--toolsets` command-line flag or `toolsets` configuration option.
@@ -308,9 +400,9 @@ The following sets of tools are available (toolsets marked with ✓ in the Defau
 |----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
 | config   | View and manage the current local Kubernetes configuration (kubeconfig)                                                                                              | ✓       |
 | core     | Most common tools for Kubernetes management (Pods, Generic Resources, Events, etc.)                                                                                  | ✓       |
-| helm     | Tools for managing Helm charts and releases                                                                                                                          | ✓       |
 | kiali    | Most common tools for managing Kiali, check the [Kiali documentation](https://github.com/containers/kubernetes-mcp-server/blob/main/docs/KIALI.md) for more details. |         |
 | kubevirt | KubeVirt virtual machine management tools                                                                                                                            |         |
+| helm     | Tools for managing Helm charts and releases                                                                                                                          | ✓       |
 
 <!-- AVAILABLE-TOOLSETS-END -->
 
@@ -325,6 +417,8 @@ In case multi-cluster support is enabled (default) and you have access to multip
 <summary>config</summary>
 
 - **configuration_contexts_list** - List all available context names and associated server urls from the kubeconfig file
+
+- **targets_list** - List all available targets
 
 - **configuration_view** - Get the current Kubernetes configuration content as a kubeconfig YAML
   - `minified` (`boolean`) - Return a minified version of the configuration. If set to true, keeps only the current-context and the relevant pieces of the configuration for that context. If set to false, all contexts, clusters, auth-infos, and users are returned in the configuration. (Optional, default true)
@@ -355,9 +449,11 @@ In case multi-cluster support is enabled (default) and you have access to multip
   - `name` (`string`) - Name of the Node to get the resource consumption from (Optional, all Nodes if not provided)
 
 - **pods_list** - List all the Kubernetes pods in the current cluster from all namespaces
+  - `fieldSelector` (`string`) - Optional Kubernetes field selector to filter pods by field values (e.g. 'status.phase=Running', 'spec.nodeName=node1'). Supported fields: metadata.name, metadata.namespace, spec.nodeName, spec.restartPolicy, spec.schedulerName, spec.serviceAccountName, status.phase (Pending/Running/Succeeded/Failed/Unknown), status.podIP, status.nominatedNodeName. Note: CrashLoopBackOff is a container state, not a pod phase, so it cannot be filtered directly. See https://kubernetes.io/docs/concepts/overview/working-with-objects/field-selectors/
   - `labelSelector` (`string`) - Optional Kubernetes label selector (e.g. 'app=myapp,env=prod' or 'app in (myapp,yourapp)'), use this option when you want to filter the pods by label
 
 - **pods_list_in_namespace** - List all the Kubernetes pods in the specified namespace in the current cluster
+  - `fieldSelector` (`string`) - Optional Kubernetes field selector to filter pods by field values (e.g. 'status.phase=Running', 'spec.nodeName=node1'). Supported fields: metadata.name, metadata.namespace, spec.nodeName, spec.restartPolicy, spec.schedulerName, spec.serviceAccountName, status.phase (Pending/Running/Succeeded/Failed/Unknown), status.podIP, status.nominatedNodeName. Note: CrashLoopBackOff is a container state, not a pod phase, so it cannot be filtered directly. See https://kubernetes.io/docs/concepts/overview/working-with-objects/field-selectors/
   - `labelSelector` (`string`) - Optional Kubernetes label selector (e.g. 'app=myapp,env=prod' or 'app in (myapp,yourapp)'), use this option when you want to filter the pods by label
   - `namespace` (`string`) **(required)** - Namespace to list pods from
 
@@ -397,8 +493,9 @@ In case multi-cluster support is enabled (default) and you have access to multip
 - **resources_list** - List Kubernetes resources and objects in the current cluster by providing their apiVersion and kind and optionally the namespace and label selector
 (common apiVersion and kind include: v1 Pod, v1 Service, v1 Node, apps/v1 Deployment, networking.k8s.io/v1 Ingress, route.openshift.io/v1 Route)
   - `apiVersion` (`string`) **(required)** - apiVersion of the resources (examples of valid apiVersion are: v1, apps/v1, networking.k8s.io/v1)
+  - `fieldSelector` (`string`) - Optional Kubernetes field selector to filter resources by field values (e.g. 'status.phase=Running', 'metadata.name=myresource'). Supported fields vary by resource type. For Pods: metadata.name, metadata.namespace, spec.nodeName, spec.restartPolicy, spec.schedulerName, spec.serviceAccountName, status.phase (Pending/Running/Succeeded/Failed/Unknown), status.podIP, status.nominatedNodeName. See https://kubernetes.io/docs/concepts/overview/working-with-objects/field-selectors/
   - `kind` (`string`) **(required)** - kind of the resources (examples of valid kind are: Pod, Service, Deployment, Ingress)
-  - `labelSelector` (`string`) - Optional Kubernetes label selector (e.g. 'app=myapp,env=prod' or 'app in (myapp,yourapp)'), use this option when you want to filter the pods by label
+  - `labelSelector` (`string`) - Optional Kubernetes label selector (e.g. 'app=myapp,env=prod' or 'app in (myapp,yourapp)'), use this option when you want to filter the resources by label
   - `namespace` (`string`) - Optional Namespace to retrieve the namespaced resources from (ignored in case of cluster scoped resources). If not provided, will list resources from all namespaces
 
 - **resources_get** - Get a Kubernetes resource in the current cluster by providing its apiVersion, kind, optionally the namespace, and its name
@@ -430,33 +527,13 @@ In case multi-cluster support is enabled (default) and you have access to multip
 
 <details>
 
-<summary>helm</summary>
-
-- **helm_install** - Install a Helm chart in the current or provided namespace
-  - `chart` (`string`) **(required)** - Chart reference to install (for example: stable/grafana, oci://ghcr.io/nginxinc/charts/nginx-ingress)
-  - `name` (`string`) - Name of the Helm release (Optional, random name if not provided)
-  - `namespace` (`string`) - Namespace to install the Helm chart in (Optional, current namespace if not provided)
-  - `values` (`object`) - Values to pass to the Helm chart (Optional)
-
-- **helm_list** - List all the Helm releases in the current or provided namespace (or in all namespaces if specified)
-  - `all_namespaces` (`boolean`) - If true, lists all Helm releases in all namespaces ignoring the namespace argument (Optional)
-  - `namespace` (`string`) - Namespace to list Helm releases from (Optional, all namespaces if not provided)
-
-- **helm_uninstall** - Uninstall a Helm release in the current or provided namespace
-  - `name` (`string`) **(required)** - Name of the Helm release to uninstall
-  - `namespace` (`string`) - Namespace to uninstall the Helm release from (Optional, current namespace if not provided)
-
-</details>
-
-<details>
-
 <summary>kiali</summary>
 
-- **kiali_get_mesh_graph** - Returns the topology of a specific namespaces, health, status of the mesh and namespaces. Includes a mesh health summary overview with aggregated counts of healthy, degraded, and failing apps, workloads, and services. Use this for high-level overviews
-  - `graphType` (`string`) - Type of graph to return: 'versionedApp', 'app', 'service', 'workload', 'mesh'
+- **kiali_mesh_graph** - Returns the topology of a specific namespaces, health, status of the mesh and namespaces. Includes a mesh health summary overview with aggregated counts of healthy, degraded, and failing apps, workloads, and services. Use this for high-level overviews
+  - `graphType` (`string`) - Optional type of graph to return: 'versionedApp', 'app', 'service', 'workload', 'mesh'
   - `namespace` (`string`) - Optional single namespace to include in the graph (alternative to namespaces)
   - `namespaces` (`string`) - Optional comma-separated list of namespaces to include in the graph
-  - `rateInterval` (`string`) - Rate interval for fetching (e.g., '10m', '5m', '1h').
+  - `rateInterval` (`string`) - Optional rate interval for fetching (e.g., '10m', '5m', '1h').
 
 - **kiali_manage_istio_config** - Manages Istio configuration objects (Gateways, VirtualServices, etc.). Can list (objects and validations), get, create, patch, or delete objects
   - `action` (`string`) **(required)** - Action to perform: list, get, create, patch, or delete
@@ -485,7 +562,7 @@ In case multi-cluster support is enabled (default) and you have access to multip
   - `resource_type` (`string`) **(required)** - Type of resource to get details for (service, workload)
   - `step` (`string`) - Step between data points in seconds (e.g., '15'). Optional, defaults to 15 seconds
 
-- **workload_logs** - Get logs for a specific workload's pods in a namespace. Only requires namespace and workload name - automatically discovers pods and containers. Optionally filter by container name, time range, and other parameters. Container is auto-detected if not specified.
+- **kiali_workload_logs** - Get logs for a specific workload's pods in a namespace. Only requires namespace and workload name - automatically discovers pods and containers. Optionally filter by container name, time range, and other parameters. Container is auto-detected if not specified.
   - `container` (`string`) - Optional container name to filter logs. If not provided, automatically detects and uses the main application container (excludes istio-proxy and istio-init)
   - `namespace` (`string`) **(required)** - Namespace containing the workload
   - `since` (`string`) - Time duration to fetch logs from (e.g., '5m', '1h', '30s'). If not provided, returns recent logs
@@ -521,6 +598,31 @@ In case multi-cluster support is enabled (default) and you have access to multip
   - `storage` (`string`) - Optional storage size for the VM's root disk when using DataSources (e.g., '30Gi', '50Gi', '100Gi'). Defaults to 30Gi. Ignored when using container disks.
   - `workload` (`string`) - The workload for the VM. Accepts OS names (e.g., 'fedora' (default), 'ubuntu', 'centos', 'centos-stream', 'debian', 'rhel', 'opensuse', 'opensuse-tumbleweed', 'opensuse-leap') or full container disk image URLs
 
+- **vm_lifecycle** - Manage VirtualMachine lifecycle: start, stop, or restart a VM
+  - `action` (`string`) **(required)** - The lifecycle action to perform: 'start' (changes runStrategy to Always), 'stop' (changes runStrategy to Halted), or 'restart' (stops then starts the VM)
+  - `name` (`string`) **(required)** - The name of the virtual machine
+  - `namespace` (`string`) **(required)** - The namespace of the virtual machine
+
+</details>
+
+<details>
+
+<summary>helm</summary>
+
+- **helm_install** - Install a Helm chart in the current or provided namespace
+  - `chart` (`string`) **(required)** - Chart reference to install (for example: stable/grafana, oci://ghcr.io/nginxinc/charts/nginx-ingress)
+  - `name` (`string`) - Name of the Helm release (Optional, random name if not provided)
+  - `namespace` (`string`) - Namespace to install the Helm chart in (Optional, current namespace if not provided)
+  - `values` (`object`) - Values to pass to the Helm chart (Optional)
+
+- **helm_list** - List all the Helm releases in the current or provided namespace (or in all namespaces if specified)
+  - `all_namespaces` (`boolean`) - If true, lists all Helm releases in all namespaces ignoring the namespace argument (Optional)
+  - `namespace` (`string`) - Namespace to list Helm releases from (Optional, all namespaces if not provided)
+
+- **helm_uninstall** - Uninstall a Helm release in the current or provided namespace
+  - `name` (`string`) **(required)** - Name of the Helm release to uninstall
+  - `namespace` (`string`) - Namespace to uninstall the Helm release from (Optional, current namespace if not provided)
+
 </details>
 
 
@@ -542,3 +644,7 @@ make build
 # Run the Kubernetes MCP server with mcp-inspector
 npx @modelcontextprotocol/inspector@latest $(pwd)/kubernetes-mcp-server
 ```
+
+---
+
+mcp-name: io.github.containers/kubernetes-mcp-server

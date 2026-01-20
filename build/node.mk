@@ -41,7 +41,8 @@ npm-copy-project-files: npm-copy-binaries ## Copy the project files to the main 
 	@echo '"author": {"name": "Marc Nuri", "url": "https://www.marcnuri.com"},' >> $(MAIN_PACKAGE_JSON)
 	@echo '"license": "Apache-2.0",' >> $(MAIN_PACKAGE_JSON)
 	@echo '"bugs": {"url": "https://github.com/containers/kubernetes-mcp-server/issues"},' >> $(MAIN_PACKAGE_JSON)
-	@echo '"homepage": "https://github.com/containers/kubernetes-mcp-server#readme"' >> $(MAIN_PACKAGE_JSON)
+	@echo '"homepage": "https://github.com/containers/kubernetes-mcp-server#readme",' >> $(MAIN_PACKAGE_JSON)
+	@echo '"mcpName": "io.github.containers/kubernetes-mcp-server"' >> $(MAIN_PACKAGE_JSON)
 	@echo '}' >> $(MAIN_PACKAGE_JSON)
 	$(foreach os,$(OSES),$(foreach arch,$(ARCHS), \
 		OS_PACKAGE_JSON=./npm/$(NPM_PACKAGE)-$(os)-$(arch)/package.json; \
@@ -67,8 +68,8 @@ npm-publish: npm-copy-project-files ## Publish the npm packages
 		npm publish --tag latest; \
 		cd ../..; \
 	))
-	cp README.md LICENSE ./npm/kubernetes-mcp-server/
-	jq '.version = "$(GIT_TAG_VERSION)"' ./npm/kubernetes-mcp-server/package.json > tmp.json && mv tmp.json ./npm/kubernetes-mcp-server/package.json; \
-	jq '.optionalDependencies |= with_entries(.value = "$(GIT_TAG_VERSION)")' ./npm/kubernetes-mcp-server/package.json > tmp.json && mv tmp.json ./npm/kubernetes-mcp-server/package.json; \
-	cd npm/kubernetes-mcp-server && npm publish --tag latest
+	cp README.md LICENSE ./npm/$(NPM_PACKAGE)/
+	jq '.version = "$(GIT_TAG_VERSION)"' ./npm/$(NPM_PACKAGE)/package.json > tmp.json && mv tmp.json ./npm/$(NPM_PACKAGE)/package.json; \
+	jq '.optionalDependencies |= with_entries(.value = "$(GIT_TAG_VERSION)")' ./npm/$(NPM_PACKAGE)/package.json > tmp.json && mv tmp.json ./npm/$(NPM_PACKAGE)/package.json; \
+	cd npm/$(NPM_PACKAGE) && npm publish --tag latest
 

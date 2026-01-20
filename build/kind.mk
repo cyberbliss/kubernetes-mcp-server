@@ -1,5 +1,18 @@
 # Kind cluster management
 
+KIND = $(shell pwd)/_output/tools/bin/kind
+KIND_VERSION ?= v0.30.0
+
+# Download and install kind if not already installed
+.PHONY: kind
+kind:
+	@[ -f $(KIND) ] || { \
+		set -e ;\
+		echo "Installing kind to $(KIND)..." ;\
+		mkdir -p $(shell dirname $(KIND)) ;\
+		GOBIN=$(shell dirname $(KIND)) go install sigs.k8s.io/kind@$(KIND_VERSION) ;\
+	}
+
 KIND_CLUSTER_NAME ?= kubernetes-mcp-server
 
 # Detect container engine (docker or podman)
@@ -51,6 +64,10 @@ kind-create-cluster: kind kind-create-certs
 		fi; \
 		echo "✅ /etc/hosts entry added"; \
 	fi
+	@echo "Exporting kubeconfig to _output/kubeconfig..."; \
+	mkdir -p _output; \
+	$(KIND) export kubeconfig --name $(KIND_CLUSTER_NAME) --kubeconfig _output/kubeconfig; \
+	echo "✅ Kubeconfig exported to _output/kubeconfig"
 
 .PHONY: kind-delete-cluster
 kind-delete-cluster: kind

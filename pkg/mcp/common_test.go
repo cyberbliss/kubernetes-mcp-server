@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
-	"time"
 
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -208,26 +207,28 @@ func (s *BaseMcpSuite) TearDownTest() {
 
 func (s *BaseMcpSuite) InitMcpClient(options ...transport.StreamableHTTPCOption) {
 	var err error
-	s.mcpServer, err = NewServer(Configuration{StaticConfig: s.Cfg})
+	s.mcpServer, err = NewServer(Configuration{StaticConfig: s.Cfg}, nil, nil)
 	s.Require().NoError(err, "Expected no error creating MCP server")
 	s.McpClient = test.NewMcpClient(s.T(), s.mcpServer.ServeHTTP(), options...)
 }
 
-// WaitForNotification waits for an MCP server notification or fails the test after a timeout
-func (s *BaseMcpSuite) WaitForNotification(timeout time.Duration) *mcp.JSONRPCNotification {
-	withTimeout, cancel := context.WithTimeout(s.T().Context(), timeout)
-	defer cancel()
-	var notification *mcp.JSONRPCNotification
-	s.OnNotification(func(n mcp.JSONRPCNotification) {
-		notification = &n
+// StartCapturingNotifications begins capturing all MCP notifications.
+// Must be called BEFORE the operation that triggers the notification.
+func (s *BaseMcpSuite) StartCapturingNotifications() *test.NotificationCapture {
+	return s.McpClient.StartCapturingNotifications()
+}
+
+// StartCapturingLogNotifications begins capturing log notifications.
+// Must be called BEFORE the tool call that triggers the notification.
+// This method sets the logging level to debug to ensure all log messages are received.
+func (s *BaseMcpSuite) StartCapturingLogNotifications() *test.NotificationCapture {
+	// Set logging level to debug to receive all log messages
+	err := s.SetLevel(s.T().Context(), mcp.SetLevelRequest{
+		Params: mcp.SetLevelParams{
+			Level: mcp.LoggingLevelDebug,
+		},
 	})
-	for notification == nil {
-		select {
-		case <-withTimeout.Done():
-			s.FailNow("timeout waiting for MCP notification")
-		default:
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-	return notification
+	s.Require().NoError(err, "failed to set logging level")
+
+	return s.StartCapturingNotifications()
 }

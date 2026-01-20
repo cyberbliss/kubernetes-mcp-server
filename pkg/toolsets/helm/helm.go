@@ -3,6 +3,8 @@ package helm
 import (
 	"fmt"
 
+	"github.com/containers/kubernetes-mcp-server/pkg/helm"
+	"github.com/containers/kubernetes-mcp-server/pkg/mcplog"
 	"github.com/google/jsonschema-go/jsonschema"
 	"k8s.io/utils/ptr"
 
@@ -112,8 +114,9 @@ func helmInstall(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 	if v, ok := params.GetArguments()["namespace"].(string); ok {
 		namespace = v
 	}
-	ret, err := params.NewHelm().Install(params, chart, values, name, namespace)
+	ret, err := helm.NewHelm(params).Install(params, chart, values, name, namespace)
 	if err != nil {
+		mcplog.HandleK8sError(params.Context, err, "helm install")
 		return api.NewToolCallResult("", fmt.Errorf("failed to install helm chart '%s': %w", chart, err)), nil
 	}
 	return api.NewToolCallResult(ret, err), nil
@@ -128,8 +131,9 @@ func helmList(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 	if v, ok := params.GetArguments()["namespace"].(string); ok {
 		namespace = v
 	}
-	ret, err := params.NewHelm().List(namespace, allNamespaces)
+	ret, err := helm.NewHelm(params).List(namespace, allNamespaces)
 	if err != nil {
+		mcplog.HandleK8sError(params.Context, err, "helm list")
 		return api.NewToolCallResult("", fmt.Errorf("failed to list helm releases in namespace '%s': %w", namespace, err)), nil
 	}
 	return api.NewToolCallResult(ret, err), nil
@@ -145,8 +149,9 @@ func helmUninstall(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 	if v, ok := params.GetArguments()["namespace"].(string); ok {
 		namespace = v
 	}
-	ret, err := params.NewHelm().Uninstall(name, namespace)
+	ret, err := helm.NewHelm(params).Uninstall(name, namespace)
 	if err != nil {
+		mcplog.HandleK8sError(params.Context, err, "helm uninstall")
 		return api.NewToolCallResult("", fmt.Errorf("failed to uninstall helm chart '%s': %w", name, err)), nil
 	}
 	return api.NewToolCallResult(ret, err), nil

@@ -7,7 +7,6 @@ import (
 	"crypto/rsa"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"github.com/containers/kubernetes-mcp-server/internal/test"
+	"github.com/containers/kubernetes-mcp-server/pkg/api"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/coreos/go-oidc/v3/oidc/oidctest"
 	"github.com/stretchr/testify/suite"
@@ -44,7 +44,7 @@ type BaseHttpSuite struct {
 func (s *BaseHttpSuite) SetupTest() {
 	http.DefaultClient.Timeout = 10 * time.Second
 	s.MockServer = test.NewMockServer()
-	s.MockServer.Handle(&test.DiscoveryClientHandler{})
+	s.MockServer.Handle(test.NewDiscoveryClientHandler())
 	s.StaticConfig = config.Default()
 	s.StaticConfig.KubeConfig = s.MockServer.KubeconfigFile(s.T())
 }
@@ -55,7 +55,7 @@ func (s *BaseHttpSuite) StartServer() {
 	s.Require().NoError(err, "Expected no error getting random port address")
 	s.StaticConfig.Port = strconv.Itoa(tcpAddr.Port)
 
-	s.mcpServer, err = mcp.NewServer(mcp.Configuration{StaticConfig: s.StaticConfig})
+	s.mcpServer, err = mcp.NewServer(mcp.Configuration{StaticConfig: s.StaticConfig}, s.OidcProvider, nil)
 	s.Require().NoError(err, "Expected no error creating MCP server")
 	s.Require().NotNil(s.mcpServer, "MCP server should not be nil")
 	var timeoutCtx, cancelCtx context.Context
@@ -115,7 +115,7 @@ func (c *httpContext) beforeEach(t *testing.T) {
 		t.Fatalf("Failed to close random port listener: %v", randomPortErr)
 	}
 	c.StaticConfig.Port = fmt.Sprintf("%d", ln.Addr().(*net.TCPAddr).Port)
-	mcpServer, err := mcp.NewServer(mcp.Configuration{StaticConfig: c.StaticConfig})
+	mcpServer, err := mcp.NewServer(mcp.Configuration{StaticConfig: c.StaticConfig}, c.OidcProvider, nil)
 	if err != nil {
 		t.Fatalf("Failed to create MCP server: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestHealthCheck(t *testing.T) {
 		})
 	})
 	// Health exposed even when require Authorization
-	testCaseWithContext(t, &httpContext{StaticConfig: &config.StaticConfig{RequireOAuth: true, ValidateToken: true, ClusterProviderStrategy: config.ClusterProviderKubeConfig}}, func(ctx *httpContext) {
+	testCaseWithContext(t, &httpContext{StaticConfig: &config.StaticConfig{RequireOAuth: true, ClusterProviderStrategy: api.ClusterProviderKubeConfig}}, func(ctx *httpContext) {
 		resp, err := http.Get(fmt.Sprintf("http://%s/healthz", ctx.HttpAddress))
 		if err != nil {
 			t.Fatalf("Failed to get health check endpoint with OAuth: %v", err)
@@ -251,292 +251,6 @@ func TestHealthCheck(t *testing.T) {
 				t.Errorf("Expected HTTP 200 OK, got %d", resp.StatusCode)
 			}
 		})
-	})
-}
-
-func TestWellKnownReverseProxy(t *testing.T) {
-	cases := []string{
-		".well-known/oauth-authorization-server",
-		".well-known/oauth-protected-resource",
-		".well-known/openid-configuration",
-	}
-	// With No Authorization URL configured
-	testCaseWithContext(t, &httpContext{StaticConfig: &config.StaticConfig{RequireOAuth: true, ValidateToken: true, ClusterProviderStrategy: config.ClusterProviderKubeConfig}}, func(ctx *httpContext) {
-		for _, path := range cases {
-			resp, err := http.Get(fmt.Sprintf("http://%s/%s", ctx.HttpAddress, path))
-			t.Cleanup(func() { _ = resp.Body.Close() })
-			t.Run("Protected resource '"+path+"' without Authorization URL returns 404 - Not Found", func(t *testing.T) {
-				if err != nil {
-					t.Fatalf("Failed to get %s endpoint: %v", path, err)
-				}
-				if resp.StatusCode != http.StatusNotFound {
-					t.Errorf("Expected HTTP 404 Not Found, got %d", resp.StatusCode)
-				}
-			})
-		}
-	})
-	// With Authorization URL configured but invalid payload
-	invalidPayloadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`NOT A JSON PAYLOAD`))
-	}))
-	t.Cleanup(invalidPayloadServer.Close)
-	invalidPayloadConfig := &config.StaticConfig{
-		AuthorizationURL:        invalidPayloadServer.URL,
-		RequireOAuth:            true,
-		ValidateToken:           true,
-		ClusterProviderStrategy: config.ClusterProviderKubeConfig,
-	}
-	testCaseWithContext(t, &httpContext{StaticConfig: invalidPayloadConfig}, func(ctx *httpContext) {
-		for _, path := range cases {
-			resp, err := http.Get(fmt.Sprintf("http://%s/%s", ctx.HttpAddress, path))
-			t.Cleanup(func() { _ = resp.Body.Close() })
-			t.Run("Protected resource '"+path+"' with invalid Authorization URL payload returns 500 - Internal Server Error", func(t *testing.T) {
-				if err != nil {
-					t.Fatalf("Failed to get %s endpoint: %v", path, err)
-				}
-				if resp.StatusCode != http.StatusInternalServerError {
-					t.Errorf("Expected HTTP 500 Internal Server Error, got %d", resp.StatusCode)
-				}
-			})
-		}
-	})
-	// With Authorization URL configured and valid payload
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.EscapedPath(), "/.well-known/") {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"issuer": "https://example.com","scopes_supported":["mcp-server"]}`))
-	}))
-	t.Cleanup(testServer.Close)
-	staticConfig := &config.StaticConfig{
-		AuthorizationURL:        testServer.URL,
-		RequireOAuth:            true,
-		ValidateToken:           true,
-		ClusterProviderStrategy: config.ClusterProviderKubeConfig,
-	}
-	testCaseWithContext(t, &httpContext{StaticConfig: staticConfig}, func(ctx *httpContext) {
-		for _, path := range cases {
-			resp, err := http.Get(fmt.Sprintf("http://%s/%s", ctx.HttpAddress, path))
-			t.Cleanup(func() { _ = resp.Body.Close() })
-			t.Run("Exposes "+path+" endpoint", func(t *testing.T) {
-				if err != nil {
-					t.Fatalf("Failed to get %s endpoint: %v", path, err)
-				}
-				if resp.StatusCode != http.StatusOK {
-					t.Errorf("Expected HTTP 200 OK, got %d", resp.StatusCode)
-				}
-			})
-			t.Run(path+" returns application/json content type", func(t *testing.T) {
-				if resp.Header.Get("Content-Type") != "application/json" {
-					t.Errorf("Expected Content-Type application/json, got %s", resp.Header.Get("Content-Type"))
-				}
-			})
-		}
-	})
-}
-
-func TestWellKnownHeaderPropagation(t *testing.T) {
-	cases := []string{
-		".well-known/oauth-authorization-server",
-		".well-known/oauth-protected-resource",
-		".well-known/openid-configuration",
-	}
-	var receivedRequestHeaders http.Header
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.EscapedPath(), "/.well-known/") {
-			http.NotFound(w, r)
-			return
-		}
-		// Capture headers received from the proxy
-		receivedRequestHeaders = r.Header.Clone()
-		// Set response headers that should be propagated back
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "https://example.com")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("X-Custom-Backend-Header", "backend-value")
-		_, _ = w.Write([]byte(`{"issuer": "https://example.com"}`))
-	}))
-	t.Cleanup(testServer.Close)
-	staticConfig := &config.StaticConfig{
-		AuthorizationURL:        testServer.URL,
-		RequireOAuth:            true,
-		ValidateToken:           true,
-		ClusterProviderStrategy: config.ClusterProviderKubeConfig,
-	}
-	testCaseWithContext(t, &httpContext{StaticConfig: staticConfig}, func(ctx *httpContext) {
-		for _, path := range cases {
-			receivedRequestHeaders = nil
-			req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/%s", ctx.HttpAddress, path), nil)
-			if err != nil {
-				t.Fatalf("Failed to create request: %v", err)
-			}
-			// Add various headers to test propagation
-			req.Header.Set("Origin", "https://example.com")
-			req.Header.Set("User-Agent", "Test-Agent/1.0")
-			req.Header.Set("Accept", "application/json")
-			req.Header.Set("Accept-Language", "en-US")
-			req.Header.Set("X-Custom-Header", "custom-value")
-			req.Header.Set("Referer", "https://example.com/page")
-
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatalf("Failed to get %s endpoint: %v", path, err)
-			}
-			t.Cleanup(func() { _ = resp.Body.Close() })
-
-			t.Run("Well-known proxy propagates Origin header to backend for "+path, func(t *testing.T) {
-				if receivedRequestHeaders == nil {
-					t.Fatal("Backend did not receive any headers")
-				}
-				if receivedRequestHeaders.Get("Origin") != "https://example.com" {
-					t.Errorf("Expected Origin header 'https://example.com', got '%s'", receivedRequestHeaders.Get("Origin"))
-				}
-			})
-
-			t.Run("Well-known proxy propagates User-Agent header to backend for "+path, func(t *testing.T) {
-				if receivedRequestHeaders.Get("User-Agent") != "Test-Agent/1.0" {
-					t.Errorf("Expected User-Agent header 'Test-Agent/1.0', got '%s'", receivedRequestHeaders.Get("User-Agent"))
-				}
-			})
-
-			t.Run("Well-known proxy propagates Accept header to backend for "+path, func(t *testing.T) {
-				if receivedRequestHeaders.Get("Accept") != "application/json" {
-					t.Errorf("Expected Accept header 'application/json', got '%s'", receivedRequestHeaders.Get("Accept"))
-				}
-			})
-
-			t.Run("Well-known proxy propagates Accept-Language header to backend for "+path, func(t *testing.T) {
-				if receivedRequestHeaders.Get("Accept-Language") != "en-US" {
-					t.Errorf("Expected Accept-Language header 'en-US', got '%s'", receivedRequestHeaders.Get("Accept-Language"))
-				}
-			})
-
-			t.Run("Well-known proxy propagates custom headers to backend for "+path, func(t *testing.T) {
-				if receivedRequestHeaders.Get("X-Custom-Header") != "custom-value" {
-					t.Errorf("Expected X-Custom-Header 'custom-value', got '%s'", receivedRequestHeaders.Get("X-Custom-Header"))
-				}
-			})
-
-			t.Run("Well-known proxy propagates Referer header to backend for "+path, func(t *testing.T) {
-				if receivedRequestHeaders.Get("Referer") != "https://example.com/page" {
-					t.Errorf("Expected Referer header 'https://example.com/page', got '%s'", receivedRequestHeaders.Get("Referer"))
-				}
-			})
-
-			t.Run("Well-known proxy returns Access-Control-Allow-Origin from backend for "+path, func(t *testing.T) {
-				if resp.Header.Get("Access-Control-Allow-Origin") != "https://example.com" {
-					t.Errorf("Expected Access-Control-Allow-Origin header 'https://example.com', got '%s'", resp.Header.Get("Access-Control-Allow-Origin"))
-				}
-			})
-
-			t.Run("Well-known proxy returns Access-Control-Allow-Methods from backend for "+path, func(t *testing.T) {
-				if resp.Header.Get("Access-Control-Allow-Methods") != "GET, POST, OPTIONS" {
-					t.Errorf("Expected Access-Control-Allow-Methods header 'GET, POST, OPTIONS', got '%s'", resp.Header.Get("Access-Control-Allow-Methods"))
-				}
-			})
-
-			t.Run("Well-known proxy returns Cache-Control from backend for "+path, func(t *testing.T) {
-				if resp.Header.Get("Cache-Control") != "no-cache" {
-					t.Errorf("Expected Cache-Control header 'no-cache', got '%s'", resp.Header.Get("Cache-Control"))
-				}
-			})
-
-			t.Run("Well-known proxy returns custom response headers from backend for "+path, func(t *testing.T) {
-				if resp.Header.Get("X-Custom-Backend-Header") != "backend-value" {
-					t.Errorf("Expected X-Custom-Backend-Header 'backend-value', got '%s'", resp.Header.Get("X-Custom-Backend-Header"))
-				}
-			})
-		}
-	})
-}
-
-func TestWellKnownOverrides(t *testing.T) {
-	cases := []string{
-		".well-known/oauth-authorization-server",
-		".well-known/oauth-protected-resource",
-		".well-known/openid-configuration",
-	}
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.EscapedPath(), "/.well-known/") {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`
-			{
-				"issuer": "https://localhost",
-				"registration_endpoint": "https://localhost/clients-registrations/openid-connect",
-				"require_request_uri_registration": true,
-				"scopes_supported":["scope-1", "scope-2"]
-			}`))
-	}))
-	t.Cleanup(testServer.Close)
-	baseConfig := config.StaticConfig{
-		AuthorizationURL:        testServer.URL,
-		RequireOAuth:            true,
-		ValidateToken:           true,
-		ClusterProviderStrategy: config.ClusterProviderKubeConfig,
-	}
-	// With Dynamic Client Registration disabled
-	disableDynamicRegistrationConfig := baseConfig
-	disableDynamicRegistrationConfig.DisableDynamicClientRegistration = true
-	testCaseWithContext(t, &httpContext{StaticConfig: &disableDynamicRegistrationConfig}, func(ctx *httpContext) {
-		for _, path := range cases {
-			resp, _ := http.Get(fmt.Sprintf("http://%s/%s", ctx.HttpAddress, path))
-			t.Cleanup(func() { _ = resp.Body.Close() })
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				t.Fatalf("Failed to read response body: %v", err)
-			}
-			t.Run("DisableDynamicClientRegistration removes registration_endpoint field", func(t *testing.T) {
-				if strings.Contains(string(body), "registration_endpoint") {
-					t.Error("Expected registration_endpoint to be removed, but it was found in the response")
-				}
-			})
-			t.Run("DisableDynamicClientRegistration sets require_request_uri_registration = false", func(t *testing.T) {
-				if !strings.Contains(string(body), `"require_request_uri_registration":false`) {
-					t.Error("Expected require_request_uri_registration to be false, but it was not found in the response")
-				}
-			})
-			t.Run("DisableDynamicClientRegistration includes/preserves scopes_supported", func(t *testing.T) {
-				if !strings.Contains(string(body), `"scopes_supported":["scope-1","scope-2"]`) {
-					t.Error("Expected scopes_supported to be present, but it was not found in the response")
-				}
-			})
-		}
-	})
-	// With overrides for OAuth scopes (client/frontend)
-	oAuthScopesConfig := baseConfig
-	oAuthScopesConfig.OAuthScopes = []string{"openid", "mcp-server"}
-	testCaseWithContext(t, &httpContext{StaticConfig: &oAuthScopesConfig}, func(ctx *httpContext) {
-		for _, path := range cases {
-			resp, _ := http.Get(fmt.Sprintf("http://%s/%s", ctx.HttpAddress, path))
-			t.Cleanup(func() { _ = resp.Body.Close() })
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				t.Fatalf("Failed to read response body: %v", err)
-			}
-			t.Run("OAuthScopes overrides scopes_supported", func(t *testing.T) {
-				if !strings.Contains(string(body), `"scopes_supported":["openid","mcp-server"]`) {
-					t.Errorf("Expected scopes_supported to be overridden, but original was preserved, response: %s", string(body))
-				}
-			})
-			t.Run("OAuthScopes preserves other fields", func(t *testing.T) {
-				if !strings.Contains(string(body), `"issuer":"https://localhost"`) {
-					t.Errorf("Expected issuer to be preserved, but got: %s", string(body))
-				}
-				if !strings.Contains(string(body), `"registration_endpoint":"https://localhost`) {
-					t.Errorf("Expected registration_endpoint to be preserved, but got: %s", string(body))
-				}
-				if !strings.Contains(string(body), `"require_request_uri_registration":true`) {
-					t.Error("Expected require_request_uri_registration to be true, but it was not found in the response")
-				}
-			})
-		}
 	})
 }
 

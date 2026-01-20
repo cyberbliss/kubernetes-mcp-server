@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/stretchr/testify/suite"
@@ -166,7 +167,7 @@ func (s *PodsSuite) TestPodsListDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to list pods in all namespaces:(.+:)? resource not allowed: /v1, Kind=Pod"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, podsList.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 	s.Run("pods_list_in_namespace (denied)", func() {
@@ -180,7 +181,30 @@ func (s *PodsSuite) TestPodsListDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to list pods in namespace ns-1:(.+:)? resource not allowed: /v1, Kind=Pod"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, podsListInNamespace.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
+		})
+	})
+}
+
+func (s *PodsSuite) TestPodsListForbidden() {
+	s.InitMcpClient()
+	defer restoreAuth(s.T().Context())
+	client := kubernetes.NewForConfigOrDie(envTestRestConfig)
+	// Remove all permissions - user will have forbidden access
+	_ = client.RbacV1().ClusterRoles().Delete(s.T().Context(), "allow-all", metav1.DeleteOptions{})
+
+	s.Run("pods_list (forbidden)", func() {
+		capture := s.StartCapturingLogNotifications()
+		toolResult, _ := s.CallTool("pods_list", map[string]interface{}{})
+		s.Run("returns error", func() {
+			s.Truef(toolResult.IsError, "call tool should fail")
+			s.Contains(toolResult.Content[0].(mcp.TextContent).Text, "forbidden",
+				"error message should indicate forbidden")
+		})
+		s.Run("sends log notification", func() {
+			logNotification := capture.RequireLogNotification(s.T(), 2*time.Second)
+			s.Equal("error", logNotification.Level, "forbidden errors should log at error level")
+			s.Contains(logNotification.Data, "Permission denied", "log message should indicate permission denied")
 		})
 	})
 }
@@ -291,10 +315,18 @@ func (s *PodsSuite) TestPodsGet() {
 		s.Truef(toolResult.IsError, "call tool should fail")
 		s.Equalf("failed to get pod, missing argument name", toolResult.Content[0].(mcp.TextContent).Text, "invalid error message, got %v", toolResult.Content[0].(mcp.TextContent).Text)
 	})
-	s.Run("pods_get(name=not-found) with not found name returns error", func() {
+	s.Run("pods_get(name=not-found) with not found name", func() {
+		capture := s.StartCapturingLogNotifications()
 		toolResult, _ := s.CallTool("pods_get", map[string]interface{}{"name": "not-found"})
-		s.Truef(toolResult.IsError, "call tool should fail")
-		s.Equalf("failed to get pod not-found in namespace : pods \"not-found\" not found", toolResult.Content[0].(mcp.TextContent).Text, "invalid error message, got %v", toolResult.Content[0].(mcp.TextContent).Text)
+		s.Run("returns error", func() {
+			s.Truef(toolResult.IsError, "call tool should fail")
+			s.Equalf("failed to get pod not-found in namespace : pods \"not-found\" not found", toolResult.Content[0].(mcp.TextContent).Text, "invalid error message, got %v", toolResult.Content[0].(mcp.TextContent).Text)
+		})
+		s.Run("sends log notification", func() {
+			logNotification := capture.RequireLogNotification(s.T(), 2*time.Second)
+			s.Equal("info", logNotification.Level, "not found errors should log at info level")
+			s.Contains(logNotification.Data, "Resource not found", "log message should indicate resource not found")
+		})
 	})
 	s.Run("pods_get(name=a-pod-in-default, namespace=nil), uses configured namespace", func() {
 		podsGetNilNamespace, err := s.CallTool("pods_get", map[string]interface{}{
@@ -354,7 +386,7 @@ func (s *PodsSuite) TestPodsGetDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to get pod a-pod-in-default in namespace :(.+:)? resource not allowed: /v1, Kind=Pod"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, podsGet.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 }
@@ -366,10 +398,18 @@ func (s *PodsSuite) TestPodsDelete() {
 		s.Truef(toolResult.IsError, "call tool should fail")
 		s.Equalf("failed to delete pod, missing argument name", toolResult.Content[0].(mcp.TextContent).Text, "invalid error message, got %v", toolResult.Content[0].(mcp.TextContent).Text)
 	})
-	s.Run("pods_delete(name=not-found) with not found name returns error", func() {
+	s.Run("pods_delete(name=not-found) with not found name", func() {
+		capture := s.StartCapturingLogNotifications()
 		toolResult, _ := s.CallTool("pods_delete", map[string]interface{}{"name": "not-found"})
-		s.Truef(toolResult.IsError, "call tool should fail")
-		s.Equalf("failed to delete pod not-found in namespace : pods \"not-found\" not found", toolResult.Content[0].(mcp.TextContent).Text, "invalid error message, got %v", toolResult.Content[0].(mcp.TextContent).Text)
+		s.Run("returns error", func() {
+			s.Truef(toolResult.IsError, "call tool should fail")
+			s.Equalf("failed to delete pod not-found in namespace : pods \"not-found\" not found", toolResult.Content[0].(mcp.TextContent).Text, "invalid error message, got %v", toolResult.Content[0].(mcp.TextContent).Text)
+		})
+		s.Run("sends log notification", func() {
+			logNotification := capture.RequireLogNotification(s.T(), 2*time.Second)
+			s.Equal("info", logNotification.Level, "not found errors should log at info level")
+			s.Contains(logNotification.Data, "Resource not found", "log message should indicate resource not found")
+		})
 	})
 	s.Run("pods_delete(name=a-pod-to-delete, namespace=nil), uses configured namespace", func() {
 		kc := kubernetes.NewForConfigOrDie(envTestRestConfig)
@@ -457,7 +497,7 @@ func (s *PodsSuite) TestPodsDeleteDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to delete pod a-pod-in-default in namespace :(.+:)? resource not allowed: /v1, Kind=Pod"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, podsDelete.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 }
@@ -611,7 +651,7 @@ func (s *PodsSuite) TestPodsLogDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to get pod a-pod-in-default log in namespace :(.+:)? resource not allowed: /v1, Kind=Pod"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, podsLog.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 }
@@ -693,6 +733,120 @@ func (s *PodsSuite) TestPodsListWithLabelSelector() {
 		})
 		s.Run("returns another-pod-with-labels", func() {
 			s.Equalf("another-pod-with-labels", decoded[0].GetName(), "invalid pod name, expected another-pod-with-labels, got %v", decoded[0].GetName())
+		})
+	})
+}
+
+func (s *PodsSuite) TestPodsListWithFieldSelector() {
+	s.InitMcpClient()
+	kc := kubernetes.NewForConfigOrDie(envTestRestConfig)
+	// Create multiple pods for field selector testing to verify filtering excludes unwanted pods
+	_, _ = kc.CoreV1().Pods("default").Create(s.T().Context(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "field-selector-target",
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "nginx", Image: "nginx"}}},
+	}, metav1.CreateOptions{})
+	_, _ = kc.CoreV1().Pods("default").Create(s.T().Context(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "field-selector-excluded",
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "nginx", Image: "nginx"}}},
+	}, metav1.CreateOptions{})
+
+	s.Run("pods_list(fieldSelector=metadata.name=field-selector-target) returns only matching pod", func() {
+		toolResult, err := s.CallTool("pods_list", map[string]interface{}{
+			"fieldSelector": "metadata.name=field-selector-target",
+		})
+		s.Run("no error", func() {
+			s.Nilf(err, "call tool failed %v", err)
+			s.Falsef(toolResult.IsError, "call tool failed")
+		})
+		var decoded []unstructured.Unstructured
+		err = yaml.Unmarshal([]byte(toolResult.Content[0].(mcp.TextContent).Text), &decoded)
+		s.Run("has yaml content", func() {
+			s.Nilf(err, "invalid tool result content %v", err)
+		})
+		s.Run("returns exactly 1 pod", func() {
+			s.Lenf(decoded, 1, "expected exactly 1 pod, got %v", len(decoded))
+		})
+		s.Run("returns field-selector-target", func() {
+			s.Equalf("field-selector-target", decoded[0].GetName(), "expected field-selector-target, got %v", decoded[0].GetName())
+		})
+		s.Run("excludes field-selector-excluded", func() {
+			for _, pod := range decoded {
+				s.NotEqualf("field-selector-excluded", pod.GetName(), "field-selector-excluded should have been filtered out")
+			}
+		})
+	})
+
+	s.Run("pods_list_in_namespace(fieldSelector=metadata.name=field-selector-target, namespace=default) returns only matching pod", func() {
+		toolResult, err := s.CallTool("pods_list_in_namespace", map[string]interface{}{
+			"namespace":     "default",
+			"fieldSelector": "metadata.name=field-selector-target",
+		})
+		s.Run("no error", func() {
+			s.Nilf(err, "call tool failed %v", err)
+			s.Falsef(toolResult.IsError, "call tool failed")
+		})
+		var decoded []unstructured.Unstructured
+		err = yaml.Unmarshal([]byte(toolResult.Content[0].(mcp.TextContent).Text), &decoded)
+		s.Run("has yaml content", func() {
+			s.Nilf(err, "invalid tool result content %v", err)
+		})
+		s.Run("returns exactly 1 pod", func() {
+			s.Lenf(decoded, 1, "expected exactly 1 pod, got %v", len(decoded))
+		})
+		s.Run("returns field-selector-target", func() {
+			s.Equalf("field-selector-target", decoded[0].GetName(), "expected field-selector-target, got %v", decoded[0].GetName())
+		})
+		s.Run("excludes field-selector-excluded", func() {
+			for _, pod := range decoded {
+				s.NotEqualf("field-selector-excluded", pod.GetName(), "field-selector-excluded should have been filtered out")
+			}
+		})
+	})
+
+	s.Run("pods_list with combined labelSelector and fieldSelector returns only matching pod", func() {
+		// Create pods with specific labels for combined filtering
+		_, _ = kc.CoreV1().Pods("default").Create(s.T().Context(), &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "combined-selector-target",
+				Labels: map[string]string{"env": "test-field-combined"},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "nginx", Image: "nginx"}}},
+		}, metav1.CreateOptions{})
+		_, _ = kc.CoreV1().Pods("default").Create(s.T().Context(), &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "combined-selector-same-label",
+				Labels: map[string]string{"env": "test-field-combined"},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "nginx", Image: "nginx"}}},
+		}, metav1.CreateOptions{})
+
+		toolResult, err := s.CallTool("pods_list", map[string]interface{}{
+			"labelSelector": "env=test-field-combined",
+			"fieldSelector": "metadata.name=combined-selector-target",
+		})
+		s.Run("no error", func() {
+			s.Nilf(err, "call tool failed %v", err)
+			s.Falsef(toolResult.IsError, "call tool failed")
+		})
+		var decoded []unstructured.Unstructured
+		err = yaml.Unmarshal([]byte(toolResult.Content[0].(mcp.TextContent).Text), &decoded)
+		s.Run("has yaml content", func() {
+			s.Nilf(err, "invalid tool result content %v", err)
+		})
+		s.Run("returns exactly 1 pod", func() {
+			s.Lenf(decoded, 1, "expected exactly 1 pod, got %v", len(decoded))
+		})
+		s.Run("returns combined-selector-target", func() {
+			s.Equalf("combined-selector-target", decoded[0].GetName(), "expected combined-selector-target, got %v", decoded[0].GetName())
+		})
+		s.Run("excludes combined-selector-same-label despite matching label", func() {
+			for _, pod := range decoded {
+				s.NotEqualf("combined-selector-same-label", pod.GetName(), "combined-selector-same-label should have been filtered out by fieldSelector")
+			}
 		})
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -101,6 +102,59 @@ func (s *ResourcesSuite) TestResourcesList() {
 			s.Lenf(decodedPods, 0, "expected 0 pods, got %d", len(decodedPods))
 		})
 	})
+	s.Run("resources_list with field selector returns filtered pods", func() {
+		// Create an additional pod in default namespace to verify it gets excluded
+		kc := kubernetes.NewForConfigOrDie(envTestRestConfig)
+		_, _ = kc.CoreV1().Pods("default").Create(s.T().Context(), &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "resources-field-excluded",
+				Labels: map[string]string{"app": "nginx"},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "nginx", Image: "nginx"}}},
+		}, metav1.CreateOptions{})
+
+		s.Run("list pods with metadata.name field selector returns only matching pod", func() {
+			result, err := s.CallTool("resources_list", map[string]interface{}{
+				"apiVersion":    "v1",
+				"kind":          "Pod",
+				"namespace":     "default",
+				"fieldSelector": "metadata.name=a-pod-in-default",
+			})
+			s.Nilf(err, "call tool failed %v", err)
+			s.Falsef(result.IsError, "call tool failed")
+
+			var decodedPods []unstructured.Unstructured
+			err = yaml.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &decodedPods)
+			s.Nilf(err, "invalid tool result content %v", err)
+
+			s.Lenf(decodedPods, 1, "expected exactly 1 pod, got %d", len(decodedPods))
+			s.Equalf("a-pod-in-default", decodedPods[0].GetName(), "expected a-pod-in-default, got %s", decodedPods[0].GetName())
+			for _, pod := range decodedPods {
+				s.NotEqualf("resources-field-excluded", pod.GetName(), "resources-field-excluded should have been filtered out")
+			}
+		})
+		s.Run("list pods with combined label and field selectors excludes pod with same label but different name", func() {
+			result, err := s.CallTool("resources_list", map[string]interface{}{
+				"apiVersion":    "v1",
+				"kind":          "Pod",
+				"namespace":     "default",
+				"labelSelector": "app=nginx",
+				"fieldSelector": "metadata.name=a-pod-in-default",
+			})
+			s.Nilf(err, "call tool failed %v", err)
+			s.Falsef(result.IsError, "call tool failed")
+
+			var decodedPods []unstructured.Unstructured
+			err = yaml.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &decodedPods)
+			s.Nilf(err, "invalid tool result content %v", err)
+
+			s.Lenf(decodedPods, 1, "expected exactly 1 pod, got %d", len(decodedPods))
+			s.Equalf("a-pod-in-default", decodedPods[0].GetName(), "expected a-pod-in-default, got %s", decodedPods[0].GetName())
+			for _, pod := range decodedPods {
+				s.NotEqualf("resources-field-excluded", pod.GetName(), "resources-field-excluded has same label but should be filtered by fieldSelector")
+			}
+		})
+	})
 }
 
 func (s *ResourcesSuite) TestResourcesListDenied() {
@@ -122,7 +176,7 @@ func (s *ResourcesSuite) TestResourcesListDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to list resources:(.+:)? resource not allowed: /v1, Kind=Secret"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, deniedByKind.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 	s.Run("resources_list (denied by group)", func() {
@@ -136,12 +190,35 @@ func (s *ResourcesSuite) TestResourcesListDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to list resources:(.+:)? resource not allowed: rbac.authorization.k8s.io/v1, Kind=Role"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, deniedByGroup.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 	s.Run("resources_list (not denied) returns list", func() {
 		allowedResource, _ := s.CallTool("resources_list", map[string]interface{}{"apiVersion": "v1", "kind": "Namespace"})
 		s.Falsef(allowedResource.IsError, "call tool should not fail")
+	})
+}
+
+func (s *ResourcesSuite) TestResourcesListForbidden() {
+	s.InitMcpClient()
+	defer restoreAuth(s.T().Context())
+	client := kubernetes.NewForConfigOrDie(envTestRestConfig)
+	// Remove all permissions - user will have forbidden access
+	_ = client.RbacV1().ClusterRoles().Delete(s.T().Context(), "allow-all", metav1.DeleteOptions{})
+
+	s.Run("resources_list (forbidden)", func() {
+		capture := s.StartCapturingLogNotifications()
+		toolResult, _ := s.CallTool("resources_list", map[string]interface{}{"apiVersion": "v1", "kind": "ConfigMap"})
+		s.Run("returns error", func() {
+			s.Truef(toolResult.IsError, "call tool should fail")
+			s.Contains(toolResult.Content[0].(mcp.TextContent).Text, "forbidden",
+				"error message should indicate forbidden")
+		})
+		s.Run("sends log notification", func() {
+			logNotification := capture.RequireLogNotification(s.T(), 2*time.Second)
+			s.Equal("error", logNotification.Level, "forbidden errors should log at error level")
+			s.Contains(logNotification.Data, "Permission denied", "log message should indicate permission denied")
+		})
 	})
 }
 
@@ -256,6 +333,20 @@ func (s *ResourcesSuite) TestResourcesGet() {
 		s.Equalf("failed to get resource, missing argument name", toolResult.Content[0].(mcp.TextContent).Text,
 			"invalid error message, got %v", toolResult.Content[0].(mcp.TextContent).Text)
 	})
+	s.Run("resources_get with nonexistent resource", func() {
+		capture := s.StartCapturingLogNotifications()
+		toolResult, _ := s.CallTool("resources_get", map[string]interface{}{"apiVersion": "v1", "kind": "ConfigMap", "name": "nonexistent-configmap"})
+		s.Run("returns error", func() {
+			s.Truef(toolResult.IsError, "call tool should fail")
+			s.Equalf(`failed to get resource: configmaps "nonexistent-configmap" not found`,
+				toolResult.Content[0].(mcp.TextContent).Text, "invalid error message, got %v", toolResult.Content[0].(mcp.TextContent).Text)
+		})
+		s.Run("sends log notification", func() {
+			logNotification := capture.RequireLogNotification(s.T(), 2*time.Second)
+			s.Equal("info", logNotification.Level, "not found errors should log at info level")
+			s.Contains(logNotification.Data, "Resource not found", "log message should indicate resource not found")
+		})
+	})
 	s.Run("resources_get returns namespace", func() {
 		namespace, err := s.CallTool("resources_get", map[string]interface{}{"apiVersion": "v1", "kind": "Namespace", "name": "default"})
 		s.Run("no error", func() {
@@ -299,7 +390,7 @@ func (s *ResourcesSuite) TestResourcesGetDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to get resource:(.+:)? resource not allowed: /v1, Kind=Secret"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, deniedByKind.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 	s.Run("resources_get (denied by group)", func() {
@@ -313,7 +404,7 @@ func (s *ResourcesSuite) TestResourcesGetDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to get resource:(.+:)? resource not allowed: rbac.authorization.k8s.io/v1, Kind=Role"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, deniedByGroup.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 	s.Run("resources_get (not denied) returns resource", func() {
@@ -464,7 +555,7 @@ func (s *ResourcesSuite) TestResourcesCreateOrUpdateDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to create or update resources:(.+:)? resource not allowed: /v1, Kind=Secret"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, deniedByKind.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 	s.Run("resources_create_or_update (denied by group)", func() {
@@ -479,7 +570,7 @@ func (s *ResourcesSuite) TestResourcesCreateOrUpdateDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to create or update resources:(.+:)? resource not allowed: rbac.authorization.k8s.io/v1, Kind=Role"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, deniedByGroup.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 	s.Run("resources_create_or_update (not denied) creates or updates resource", func() {
@@ -487,6 +578,30 @@ func (s *ResourcesSuite) TestResourcesCreateOrUpdateDenied() {
 		allowedResource, err := s.CallTool("resources_create_or_update", map[string]interface{}{"resource": configMapYaml})
 		s.Falsef(allowedResource.IsError, "call tool should not fail")
 		s.Nilf(err, "call tool should not return error object")
+	})
+}
+
+func (s *ResourcesSuite) TestResourcesCreateOrUpdateForbidden() {
+	s.InitMcpClient()
+	defer restoreAuth(s.T().Context())
+	client := kubernetes.NewForConfigOrDie(envTestRestConfig)
+	// Remove all permissions - user will have forbidden access
+	_ = client.RbacV1().ClusterRoles().Delete(s.T().Context(), "allow-all", metav1.DeleteOptions{})
+
+	s.Run("resources_create_or_update (forbidden)", func() {
+		capture := s.StartCapturingLogNotifications()
+		configMapYaml := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a-forbidden-configmap\n  namespace: default\n"
+		toolResult, _ := s.CallTool("resources_create_or_update", map[string]interface{}{"resource": configMapYaml})
+		s.Run("returns error", func() {
+			s.Truef(toolResult.IsError, "call tool should fail")
+			s.Contains(toolResult.Content[0].(mcp.TextContent).Text, "forbidden",
+				"error message should indicate forbidden")
+		})
+		s.Run("sends log notification", func() {
+			logNotification := capture.RequireLogNotification(s.T(), 2*time.Second)
+			s.Equal("error", logNotification.Level, "forbidden errors should log at error level")
+			s.Contains(logNotification.Data, "Permission denied", "log message should indicate permission denied")
+		})
 	})
 }
 
@@ -524,11 +639,19 @@ func (s *ResourcesSuite) TestResourcesDelete() {
 		s.Equalf("failed to delete resource, missing argument name", toolResult.Content[0].(mcp.TextContent).Text,
 			"invalid error message, got %v", toolResult.Content[0].(mcp.TextContent).Text)
 	})
-	s.Run("resources_delete with nonexistent resource returns error", func() {
+	s.Run("resources_delete with nonexistent resource", func() {
+		capture := s.StartCapturingLogNotifications()
 		toolResult, _ := s.CallTool("resources_delete", map[string]interface{}{"apiVersion": "v1", "kind": "ConfigMap", "name": "nonexistent-configmap"})
-		s.Truef(toolResult.IsError, "call tool should fail")
-		s.Equalf(`failed to delete resource: configmaps "nonexistent-configmap" not found`,
-			toolResult.Content[0].(mcp.TextContent).Text, "invalid error message, got %v", toolResult.Content[0].(mcp.TextContent).Text)
+		s.Run("returns error", func() {
+			s.Truef(toolResult.IsError, "call tool should fail")
+			s.Equalf(`failed to delete resource: configmaps "nonexistent-configmap" not found`,
+				toolResult.Content[0].(mcp.TextContent).Text, "invalid error message, got %v", toolResult.Content[0].(mcp.TextContent).Text)
+		})
+		s.Run("sends log notification", func() {
+			logNotification := capture.RequireLogNotification(s.T(), 2*time.Second)
+			s.Equal("info", logNotification.Level, "not found errors should log at info level")
+			s.Contains(logNotification.Data, "Resource not found", "log message should indicate resource not found")
+		})
 	})
 
 	s.Run("resources_delete with valid namespaced resource", func() {
@@ -583,7 +706,7 @@ func (s *ResourcesSuite) TestResourcesDeleteDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to delete resource:(.+:)? resource not allowed: /v1, Kind=Secret"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, deniedByKind.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 	s.Run("resources_delete (denied by group)", func() {
@@ -597,7 +720,7 @@ func (s *ResourcesSuite) TestResourcesDeleteDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to delete resource:(.+:)? resource not allowed: rbac.authorization.k8s.io/v1, Kind=Role"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, deniedByGroup.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 	s.Run("resources_delete (not denied) deletes resource", func() {
@@ -694,16 +817,24 @@ func (s *ResourcesSuite) TestResourcesScale() {
 			s.Equalf(int32(5), *deployment.Spec.Replicas, "expected 5 replicas in deployment, got %d", *deployment.Spec.Replicas)
 		})
 	})
-	s.Run("resources_scale with nonexistent resource returns error", func() {
+	s.Run("resources_scale with nonexistent resource", func() {
+		capture := s.StartCapturingLogNotifications()
 		toolResult, _ := s.CallTool("resources_scale", map[string]interface{}{
 			"apiVersion": "apps/v1",
 			"kind":       "Deployment",
 			"namespace":  "default",
 			"name":       "nonexistent-deployment",
 		})
-		s.Truef(toolResult.IsError, "call tool should fail")
-		s.Containsf(toolResult.Content[0].(mcp.TextContent).Text, "not found",
-			"expected not found error, got %v", toolResult.Content[0].(mcp.TextContent).Text)
+		s.Run("returns error", func() {
+			s.Truef(toolResult.IsError, "call tool should fail")
+			s.Containsf(toolResult.Content[0].(mcp.TextContent).Text, "not found",
+				"expected not found error, got %v", toolResult.Content[0].(mcp.TextContent).Text)
+		})
+		s.Run("sends log notification", func() {
+			logNotification := capture.RequireLogNotification(s.T(), 2*time.Second)
+			s.Equal("info", logNotification.Level, "not found errors should log at info level")
+			s.Contains(logNotification.Data, "Resource not found", "log message should indicate resource not found")
+		})
 	})
 	s.Run("resources_scale with resource that does not support scale subresource returns error", func() {
 		configMapName := "configmap-without-scale"
@@ -747,7 +878,7 @@ func (s *ResourcesSuite) TestResourcesScaleDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to get/update resource scale:(.+:)? resource not allowed: /v1, Kind=ReplicationController"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, deniedByKind.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 	s.Run("resources_scale update (denied by kind)", func() {
@@ -767,7 +898,7 @@ func (s *ResourcesSuite) TestResourcesScaleDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to get/update resource scale:(.+:)? resource not allowed: /v1, Kind=ReplicationController"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, deniedByKind.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 	s.Run("resources_scale get (denied by group)", func() {
@@ -786,7 +917,7 @@ func (s *ResourcesSuite) TestResourcesScaleDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to get/update resource scale:(.+:)? resource not allowed: apps/v1, Kind=StatefulSet"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, deniedByGroup.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 	s.Run("resources_scale update (denied by group)", func() {
@@ -806,7 +937,7 @@ func (s *ResourcesSuite) TestResourcesScaleDenied() {
 			s.Contains(msg, "resource not allowed:")
 			expectedMessage := "failed to get/update resource scale:(.+:)? resource not allowed: apps/v1, Kind=StatefulSet"
 			s.Regexpf(expectedMessage, msg,
-				"expected descriptive error '%s', got %v", expectedMessage, deniedByGroup.Content[0].(mcp.TextContent).Text)
+				"expected descriptive error '%s', got %v", expectedMessage, msg)
 		})
 	})
 }

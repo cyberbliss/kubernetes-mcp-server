@@ -14,6 +14,7 @@ import (
 
 	"github.com/containers/kubernetes-mcp-server/pkg/api"
 	"github.com/containers/kubernetes-mcp-server/pkg/kubernetes"
+	"github.com/containers/kubernetes-mcp-server/pkg/mcplog"
 )
 
 func initNodes() []api.ServerTool {
@@ -114,9 +115,10 @@ func nodesLog(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 			return api.NewToolCallResult("", fmt.Errorf("failed to parse tailLines parameter: %w", err)), nil
 		}
 	}
-	ret, err := params.NodesLog(params, name, query, tailInt)
+	ret, err := kubernetes.NewCore(params).NodesLog(params, name, query, tailInt)
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to get node log for %s: %v", name, err)), nil
+		mcplog.HandleK8sError(params.Context, err, "node log access")
+		return api.NewToolCallResult("", fmt.Errorf("failed to get node log for %s: %w", name, err)), nil
 	} else if ret == "" {
 		ret = fmt.Sprintf("The node %s has not logged any message yet or the log file is empty", name)
 	}
@@ -128,15 +130,16 @@ func nodesStatsSummary(params api.ToolHandlerParams) (*api.ToolCallResult, error
 	if !ok || name == "" {
 		return api.NewToolCallResult("", errors.New("failed to get node stats summary, missing argument name")), nil
 	}
-	ret, err := params.NodesStatsSummary(params, name)
+	ret, err := kubernetes.NewCore(params).NodesStatsSummary(params, name)
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to get node stats summary for %s: %v", name, err)), nil
+		mcplog.HandleK8sError(params.Context, err, "node stats access")
+		return api.NewToolCallResult("", fmt.Errorf("failed to get node stats summary for %s: %w", name, err)), nil
 	}
 	return api.NewToolCallResult(ret, nil), nil
 }
 
 func nodesTop(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
-	nodesTopOptions := kubernetes.NodesTopOptions{}
+	nodesTopOptions := api.NodesTopOptions{}
 	if v, ok := params.GetArguments()["name"].(string); ok {
 		nodesTopOptions.Name = v
 	}
@@ -144,22 +147,19 @@ func nodesTop(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 		nodesTopOptions.LabelSelector = v
 	}
 
-	nodeMetrics, err := params.NodesTop(params, nodesTopOptions)
+	nodeMetrics, err := kubernetes.NewCore(params).NodesTop(params, nodesTopOptions)
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to get nodes top: %v", err)), nil
+		mcplog.HandleK8sError(params.Context, err, "node metrics access")
+		return api.NewToolCallResult("", fmt.Errorf("failed to get nodes top: %w", err)), nil
 	}
 
 	// Get the list of nodes to extract their allocatable resources
-	nodes, err := params.AccessControlClientset().Nodes()
-	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to get nodes client: %v", err)), nil
-	}
-
-	nodeList, err := nodes.List(params, metav1.ListOptions{
+	nodeList, err := params.CoreV1().Nodes().List(params, metav1.ListOptions{
 		LabelSelector: nodesTopOptions.LabelSelector,
 	})
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to list nodes: %v", err)), nil
+		mcplog.HandleK8sError(params.Context, err, "node listing")
+		return api.NewToolCallResult("", fmt.Errorf("failed to list nodes: %w", err)), nil
 	}
 
 	// Build availableResources map
@@ -179,7 +179,7 @@ func nodesTop(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 	printer := metricsutil.NewTopCmdPrinter(buf, true)
 	err = printer.PrintNodeMetrics(nodeMetrics.Items, availableResources, false, "")
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to print node metrics: %v", err)), nil
+		return api.NewToolCallResult("", fmt.Errorf("failed to print node metrics: %w", err)), nil
 	}
 
 	return api.NewToolCallResult(buf.String(), nil), nil

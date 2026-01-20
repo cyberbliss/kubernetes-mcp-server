@@ -10,11 +10,12 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/containers/kubernetes-mcp-server/pkg/api"
-	internalk8s "github.com/containers/kubernetes-mcp-server/pkg/kubernetes"
+	"github.com/containers/kubernetes-mcp-server/pkg/kubernetes"
+	"github.com/containers/kubernetes-mcp-server/pkg/mcplog"
 	"github.com/containers/kubernetes-mcp-server/pkg/output"
 )
 
-func initResources(o internalk8s.Openshift) []api.ServerTool {
+func initResources(o api.Openshift) []api.ServerTool {
 	commonApiVersion := "v1 Pod, v1 Service, v1 Node, apps/v1 Deployment, networking.k8s.io/v1 Ingress"
 	if o.IsOpenShift(context.Background()) {
 		commonApiVersion += ", route.openshift.io/v1 Route"
@@ -41,7 +42,12 @@ func initResources(o internalk8s.Openshift) []api.ServerTool {
 					},
 					"labelSelector": {
 						Type:        "string",
-						Description: "Optional Kubernetes label selector (e.g. 'app=myapp,env=prod' or 'app in (myapp,yourapp)'), use this option when you want to filter the pods by label",
+						Description: "Optional Kubernetes label selector (e.g. 'app=myapp,env=prod' or 'app in (myapp,yourapp)'), use this option when you want to filter the resources by label",
+						Pattern:     "([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]",
+					},
+					"fieldSelector": {
+						Type:        "string",
+						Description: "Optional Kubernetes field selector to filter resources by field values (e.g. 'status.phase=Running', 'metadata.name=myresource'). Supported fields vary by resource type. For Pods: metadata.name, metadata.namespace, spec.nodeName, spec.restartPolicy, spec.schedulerName, spec.serviceAccountName, status.phase (Pending/Running/Succeeded/Failed/Unknown), status.podIP, status.nominatedNodeName. See https://kubernetes.io/docs/concepts/overview/working-with-objects/field-selectors/",
 						Pattern:     "([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]",
 					},
 				},
@@ -183,7 +189,7 @@ func resourcesList(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 		namespace = ""
 	}
 	labelSelector := params.GetArguments()["labelSelector"]
-	resourceListOptions := internalk8s.ResourceListOptions{
+	resourceListOptions := api.ListOptions{
 		AsTable: params.ListOutput.AsTable(),
 	}
 
@@ -193,6 +199,14 @@ func resourcesList(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 			return api.NewToolCallResult("", fmt.Errorf("labelSelector is not a string")), nil
 		}
 		resourceListOptions.LabelSelector = l
+	}
+	fieldSelector := params.GetArguments()["fieldSelector"]
+	if fieldSelector != nil {
+		f, ok := fieldSelector.(string)
+		if !ok {
+			return api.NewToolCallResult("", fmt.Errorf("fieldSelector is not a string")), nil
+		}
+		resourceListOptions.FieldSelector = f
 	}
 	gvk, err := parseGroupVersionKind(params.GetArguments())
 	if err != nil {
@@ -204,9 +218,10 @@ func resourcesList(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 		return api.NewToolCallResult("", fmt.Errorf("namespace is not a string")), nil
 	}
 
-	ret, err := params.ResourcesList(params, gvk, ns, resourceListOptions)
+	ret, err := kubernetes.NewCore(params).ResourcesList(params, gvk, ns, resourceListOptions)
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to list resources: %v", err)), nil
+		mcplog.HandleK8sError(params.Context, err, "resource listing")
+		return api.NewToolCallResult("", fmt.Errorf("failed to list resources: %w", err)), nil
 	}
 	return api.NewToolCallResult(params.ListOutput.PrintObj(ret)), nil
 }
@@ -235,9 +250,10 @@ func resourcesGet(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 		return api.NewToolCallResult("", fmt.Errorf("name is not a string")), nil
 	}
 
-	ret, err := params.ResourcesGet(params, gvk, ns, n)
+	ret, err := kubernetes.NewCore(params).ResourcesGet(params, gvk, ns, n)
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to get resource: %v", err)), nil
+		mcplog.HandleK8sError(params.Context, err, "resource access")
+		return api.NewToolCallResult("", fmt.Errorf("failed to get resource: %w", err)), nil
 	}
 	return api.NewToolCallResult(output.MarshalYaml(ret)), nil
 }
@@ -253,13 +269,14 @@ func resourcesCreateOrUpdate(params api.ToolHandlerParams) (*api.ToolCallResult,
 		return api.NewToolCallResult("", fmt.Errorf("resource is not a string")), nil
 	}
 
-	resources, err := params.ResourcesCreateOrUpdate(params, r)
+	resources, err := kubernetes.NewCore(params).ResourcesCreateOrUpdate(params, r)
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to create or update resources: %v", err)), nil
+		mcplog.HandleK8sError(params.Context, err, "resource creation or update")
+		return api.NewToolCallResult("", fmt.Errorf("failed to create or update resources: %w", err)), nil
 	}
 	marshalledYaml, err := output.MarshalYaml(resources)
 	if err != nil {
-		err = fmt.Errorf("failed to create or update resources:: %v", err)
+		err = fmt.Errorf("failed to create or update resources: %w", err)
 	}
 	return api.NewToolCallResult("# The following resources (YAML) have been created or updated successfully\n"+marshalledYaml, err), nil
 }
@@ -288,9 +305,10 @@ func resourcesDelete(params api.ToolHandlerParams) (*api.ToolCallResult, error) 
 		return api.NewToolCallResult("", fmt.Errorf("name is not a string")), nil
 	}
 
-	err = params.ResourcesDelete(params, gvk, ns, n)
+	err = kubernetes.NewCore(params).ResourcesDelete(params, gvk, ns, n)
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to delete resource: %v", err)), nil
+		mcplog.HandleK8sError(params.Context, err, "resource deletion")
+		return api.NewToolCallResult("", fmt.Errorf("failed to delete resource: %w", err)), nil
 	}
 	return api.NewToolCallResult("Resource deleted successfully", err), nil
 }
@@ -316,8 +334,6 @@ func resourcesScale(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 		return api.NewToolCallResult("", fmt.Errorf("namespace is not a string")), nil
 	}
 
-	ns = params.NamespaceOrDefault(ns)
-
 	n, ok := name.(string)
 	if !ok {
 		return api.NewToolCallResult("", fmt.Errorf("name is not a string")), nil
@@ -332,8 +348,9 @@ func resourcesScale(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 		}
 	}
 
-	scale, err := params.ResourcesScale(params.Context, gvk, ns, n, desiredScale, shouldScale)
+	scale, err := kubernetes.NewCore(params).ResourcesScale(params.Context, gvk, ns, n, desiredScale, shouldScale)
 	if err != nil {
+		mcplog.HandleK8sError(params.Context, err, "resource scaling")
 		return api.NewToolCallResult("", fmt.Errorf("failed to get/update resource scale: %w", err)), nil
 	}
 

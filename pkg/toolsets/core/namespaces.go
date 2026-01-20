@@ -8,10 +8,11 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/containers/kubernetes-mcp-server/pkg/api"
-	internalk8s "github.com/containers/kubernetes-mcp-server/pkg/kubernetes"
+	"github.com/containers/kubernetes-mcp-server/pkg/kubernetes"
+	"github.com/containers/kubernetes-mcp-server/pkg/mcplog"
 )
 
-func initNamespaces(o internalk8s.Openshift) []api.ServerTool {
+func initNamespaces(o api.Openshift) []api.ServerTool {
 	ret := make([]api.ServerTool, 0)
 	ret = append(ret, api.ServerTool{
 		Tool: api.Tool{
@@ -49,17 +50,19 @@ func initNamespaces(o internalk8s.Openshift) []api.ServerTool {
 }
 
 func namespacesList(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
-	ret, err := params.NamespacesList(params, internalk8s.ResourceListOptions{AsTable: params.ListOutput.AsTable()})
+	ret, err := kubernetes.NewCore(params).NamespacesList(params, api.ListOptions{AsTable: params.ListOutput.AsTable()})
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to list namespaces: %v", err)), nil
+		mcplog.HandleK8sError(params.Context, err, "namespace listing")
+		return api.NewToolCallResult("", fmt.Errorf("failed to list namespaces: %w", err)), nil
 	}
 	return api.NewToolCallResult(params.ListOutput.PrintObj(ret)), nil
 }
 
 func projectsList(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
-	ret, err := params.ProjectsList(params, internalk8s.ResourceListOptions{AsTable: params.ListOutput.AsTable()})
+	ret, err := kubernetes.NewCore(params).ProjectsList(params, api.ListOptions{AsTable: params.ListOutput.AsTable()})
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to list projects: %v", err)), nil
+		mcplog.HandleK8sError(params.Context, err, "project listing")
+		return api.NewToolCallResult("", fmt.Errorf("failed to list projects: %w", err)), nil
 	}
 	return api.NewToolCallResult(params.ListOutput.PrintObj(ret)), nil
 }

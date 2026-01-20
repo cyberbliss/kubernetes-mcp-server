@@ -268,9 +268,6 @@ make keycloak-status
 
 # Tail Keycloak logs
 make keycloak-logs
-
-# Install required development tools (like Kind) to ./_output/bin/
-make tools
 ```
 
 **Distribution and Publishing:**
@@ -296,7 +293,7 @@ When introducing new modules run `make tidy` so that `go.mod` and `go.sum` remai
 
 ## Coding style
 
-- Go modules target Go **1.24** (see `go.mod`).
+- Go modules target Go **1.25** (see `go.mod`).
 - Tests are written with the standard library `testing` package.
 - Build, test and lint steps are defined in the Makefile—keep them working.
 

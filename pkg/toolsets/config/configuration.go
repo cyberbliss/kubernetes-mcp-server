@@ -7,6 +7,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/containers/kubernetes-mcp-server/pkg/api"
+	"github.com/containers/kubernetes-mcp-server/pkg/kubernetes"
 	"github.com/containers/kubernetes-mcp-server/pkg/output"
 )
 
@@ -30,6 +31,30 @@ func initConfiguration() []api.ServerTool {
 			ClusterAware:       ptr.To(false),
 			TargetListProvider: ptr.To(true),
 			Handler:            contextsList,
+		},
+		// Generic targets list tool for non-kubeconfig providers (e.g., ACM).
+		// The WithTargetListTool mutator will:
+		// - Rename the tool to "{targetParameterName}_list" (e.g., "cluster_list")
+		// - Update the description and title accordingly
+		// - Set the handler with the actual targets
+		{
+			Tool: api.Tool{
+				Name:        "targets_list",
+				Description: "List all available targets",
+				InputSchema: &jsonschema.Schema{
+					Type: "object",
+				},
+				Annotations: api.ToolAnnotations{
+					Title:           "Targets List",
+					ReadOnlyHint:    ptr.To(true),
+					DestructiveHint: ptr.To(false),
+					IdempotentHint:  ptr.To(true),
+					OpenWorldHint:   ptr.To(false),
+				},
+			},
+			ClusterAware:       ptr.To(false),
+			TargetListProvider: ptr.To(true),
+			Handler:            nil,
 		},
 		{
 			Tool: api.Tool{
@@ -62,18 +87,18 @@ func initConfiguration() []api.ServerTool {
 }
 
 func contextsList(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
-	contexts, err := params.ConfigurationContextsList()
+	contexts, err := kubernetes.NewCore(params).ConfigurationContextsList()
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to list contexts: %v", err)), nil
+		return api.NewToolCallResult("", fmt.Errorf("failed to list contexts: %w", err)), nil
 	}
 
 	if len(contexts) == 0 {
 		return api.NewToolCallResult("No contexts found in kubeconfig", nil), nil
 	}
 
-	defaultContext, err := params.ConfigurationContextsDefault()
+	defaultContext, err := kubernetes.NewCore(params).ConfigurationContextsDefault()
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to get default context: %v", err)), nil
+		return api.NewToolCallResult("", fmt.Errorf("failed to get default context: %w", err)), nil
 	}
 
 	result := fmt.Sprintf("Available Kubernetes contexts (%d total, default: %s):\n\n", len(contexts), defaultContext)
@@ -102,13 +127,13 @@ func configurationView(params api.ToolHandlerParams) (*api.ToolCallResult, error
 	if _, ok := minified.(bool); ok {
 		minify = minified.(bool)
 	}
-	ret, err := params.ConfigurationView(minify)
+	ret, err := kubernetes.NewCore(params).ConfigurationView(minify)
 	if err != nil {
-		return api.NewToolCallResult("", fmt.Errorf("failed to get configuration: %v", err)), nil
+		return api.NewToolCallResult("", fmt.Errorf("failed to get configuration: %w", err)), nil
 	}
 	configurationYaml, err := output.MarshalYaml(ret)
 	if err != nil {
-		err = fmt.Errorf("failed to get configuration: %v", err)
+		err = fmt.Errorf("failed to get configuration: %w", err)
 	}
 	return api.NewToolCallResult(configurationYaml, err), nil
 }
