@@ -437,6 +437,170 @@ func (s *HelmSuite) TestHelmHistory() {
 	})
 }
 
+func (s *HelmSuite) TestHelmUpgrade() {
+	s.Run("helm_upgrade(name=non-existent-release) fails with helpful error", func() {
+		s.InitMcpClient()
+		toolResult, err := s.CallTool("helm_upgrade", map[string]interface{}{
+			"name":  "non-existent-release",
+			"chart": "test-chart",
+		})
+		s.Run("has error", func() {
+			s.Truef(toolResult.IsError, "call tool should fail for non-existent release")
+			s.Nilf(err, "call tool should not return error object")
+		})
+		s.Run("describes error with helpful message", func() {
+			msg := toolResult.Content[0].(mcp.TextContent).Text
+			s.Contains(msg, "release not found", "error should mention release not found")
+			s.Contains(msg, "helm_install", "error should suggest using helm_install")
+		})
+	})
+
+	s.Run("helm_upgrade(name=existing-release) with valid chart", func() {
+		kc := kubernetes.NewForConfigOrDie(envTestRestConfig)
+		// Create initial release (v1)
+		_, err := kc.CoreV1().Secrets("default").Create(s.T().Context(), &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "sh.helm.release.v1.release-to-upgrade.v1",
+				Labels: map[string]string{"owner": "helm", "name": "release-to-upgrade", "version": "1"},
+			},
+			Data: map[string][]byte{
+				"release": []byte(base64.StdEncoding.EncodeToString([]byte("{" +
+					"\"name\":\"release-to-upgrade\"," +
+					"\"namespace\":\"default\"," +
+					"\"version\":1," +
+					"\"info\":{\"status\":\"deployed\",\"last_deployed\":\"2024-01-01T00:00:00Z\"}," +
+					"\"chart\":{\"metadata\":{\"name\":\"test-chart\",\"version\":\"1.0.0\",\"appVersion\":\"1.0.0\"}}" +
+					"}"))),
+			},
+		}, metav1.CreateOptions{})
+		s.Require().NoError(err)
+		s.InitMcpClient()
+
+		_, file, _, _ := runtime.Caller(0)
+		chartPath := filepath.Join(filepath.Dir(file), "testdata", "helm-chart-no-op")
+		toolResult, err := s.CallTool("helm_upgrade", map[string]interface{}{
+			"name":  "release-to-upgrade",
+			"chart": chartPath,
+		})
+		s.Run("no error", func() {
+			s.Nilf(err, "call tool failed %v", err)
+			s.Falsef(toolResult.IsError, "call tool failed")
+		})
+		s.Run("returns upgraded chart", func() {
+			var decoded []map[string]interface{}
+			err = yaml.Unmarshal([]byte(toolResult.Content[0].(mcp.TextContent).Text), &decoded)
+			s.Run("has yaml content", func() {
+				s.Nilf(err, "invalid tool result content %v", err)
+			})
+			s.Run("has 1 item", func() {
+				s.Lenf(decoded, 1, "invalid helm upgrade count, expected 1, got %v", len(decoded))
+			})
+			s.Run("has valid name", func() {
+				s.Equalf("release-to-upgrade", decoded[0]["name"], "invalid helm upgrade name, expected release-to-upgrade, got %v", decoded[0]["name"])
+			})
+			s.Run("has valid namespace", func() {
+				s.Equalf("default", decoded[0]["namespace"], "invalid helm upgrade namespace, expected default, got %v", decoded[0]["namespace"])
+			})
+			s.Run("has valid chart", func() {
+				s.Equalf("no-op", decoded[0]["chart"], "invalid helm upgrade chart name, expected no-op, got %v", decoded[0]["chart"])
+			})
+			s.Run("has valid status", func() {
+				s.Equalf("deployed", decoded[0]["status"], "invalid helm upgrade status, expected deployed, got %v", decoded[0]["status"])
+			})
+			s.Run("has incremented revision", func() {
+				s.Equalf(float64(2), decoded[0]["revision"], "invalid helm upgrade revision, expected 2, got %v", decoded[0]["revision"])
+			})
+		})
+	})
+
+	s.Run("helm_upgrade(name=existing-release, values={...})", func() {
+		kc := kubernetes.NewForConfigOrDie(envTestRestConfig)
+		// Create initial release
+		_, err := kc.CoreV1().Secrets("default").Create(s.T().Context(), &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "sh.helm.release.v1.release-with-values.v1",
+				Labels: map[string]string{"owner": "helm", "name": "release-with-values", "version": "1"},
+			},
+			Data: map[string][]byte{
+				"release": []byte(base64.StdEncoding.EncodeToString([]byte("{" +
+					"\"name\":\"release-with-values\"," +
+					"\"namespace\":\"default\"," +
+					"\"version\":1," +
+					"\"info\":{\"status\":\"deployed\",\"last_deployed\":\"2024-01-01T00:00:00Z\"}," +
+					"\"chart\":{\"metadata\":{\"name\":\"test-chart\",\"version\":\"1.0.0\",\"appVersion\":\"1.0.0\"}}" +
+					"}"))),
+			},
+		}, metav1.CreateOptions{})
+		s.Require().NoError(err)
+		s.InitMcpClient()
+
+		_, file, _, _ := runtime.Caller(0)
+		chartPath := filepath.Join(filepath.Dir(file), "testdata", "helm-chart-no-op")
+		toolResult, err := s.CallTool("helm_upgrade", map[string]interface{}{
+			"name":   "release-with-values",
+			"chart":  chartPath,
+			"values": map[string]interface{}{"key": "value"},
+		})
+		s.Run("no error", func() {
+			s.Nilf(err, "call tool failed %v", err)
+			s.Falsef(toolResult.IsError, "call tool failed")
+		})
+		s.Run("returns upgraded chart", func() {
+			var decoded []map[string]interface{}
+			err = yaml.Unmarshal([]byte(toolResult.Content[0].(mcp.TextContent).Text), &decoded)
+			s.Nilf(err, "invalid tool result content %v", err)
+			s.Lenf(decoded, 1, "invalid helm upgrade count, expected 1, got %v", len(decoded))
+			s.Equalf("release-with-values", decoded[0]["name"], "invalid helm upgrade name")
+			s.Equalf(float64(2), decoded[0]["revision"], "invalid helm upgrade revision, expected 2, got %v", decoded[0]["revision"])
+		})
+	})
+
+	s.Run("helm_upgrade(name=release, namespace=custom-ns)", func() {
+		kc := kubernetes.NewForConfigOrDie(envTestRestConfig)
+		// Create namespace
+		_, err := kc.CoreV1().Namespaces().Create(s.T().Context(), &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "custom-ns",
+			},
+		}, metav1.CreateOptions{})
+		if err != nil && !errors.IsAlreadyExists(err) {
+			s.Require().NoError(err)
+		}
+		s.InitMcpClient()
+
+		// First install a release in the custom namespace
+		_, file, _, _ := runtime.Caller(0)
+		chartPath := filepath.Join(filepath.Dir(file), "testdata", "helm-chart-no-op")
+		installResult, err := s.CallTool("helm_install", map[string]interface{}{
+			"name":      "release-custom-ns",
+			"chart":     chartPath,
+			"namespace": "custom-ns",
+		})
+		s.Require().NoError(err, "install should not return error")
+		s.Require().Falsef(installResult.IsError, "install should succeed, got error: %v", installResult.Content)
+
+		// Now upgrade the release
+		toolResult, err := s.CallTool("helm_upgrade", map[string]interface{}{
+			"name":      "release-custom-ns",
+			"chart":     chartPath,
+			"namespace": "custom-ns",
+		})
+		s.Run("no error", func() {
+			s.Nilf(err, "call tool failed %v", err)
+			s.Falsef(toolResult.IsError, "call tool failed")
+		})
+		s.Run("returns upgraded chart in custom namespace", func() {
+			var decoded []map[string]interface{}
+			err = yaml.Unmarshal([]byte(toolResult.Content[0].(mcp.TextContent).Text), &decoded)
+			s.Nilf(err, "invalid tool result content %v", err)
+			s.Lenf(decoded, 1, "invalid helm upgrade count, expected 1, got %v", len(decoded))
+			s.Equalf("release-custom-ns", decoded[0]["name"], "invalid helm upgrade name")
+			s.Equalf("custom-ns", decoded[0]["namespace"], "invalid helm upgrade namespace, expected custom-ns, got %v", decoded[0]["namespace"])
+			s.Equalf(float64(2), decoded[0]["revision"], "invalid helm upgrade revision, expected 2, got %v", decoded[0]["revision"])
+		})
+	})
+}
+
 func TestHelm(t *testing.T) {
 	suite.Run(t, new(HelmSuite))
 }

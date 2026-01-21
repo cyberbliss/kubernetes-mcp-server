@@ -32,6 +32,7 @@ A powerful and flexible Kubernetes [Model Context Protocol (MCP)](https://blog.m
 - **✅ Projects**: List OpenShift Projects.
 - **☸️ Helm**:
   - **Install** a Helm chart in the current or provided namespace.
+  - **Upgrade** an existing Helm release to a new chart version or with new values.
   - **List** Helm releases in all namespaces or in a specific namespace.
   - **Uninstall** a Helm release in the current or provided namespace.
 
@@ -615,6 +616,12 @@ In case multi-cluster support is enabled (default) and you have access to multip
   - `namespace` (`string`) - Namespace to install the Helm chart in (Optional, current namespace if not provided)
   - `values` (`object`) - Values to pass to the Helm chart (Optional)
 
+- **helm_upgrade** - Upgrade an existing Helm release to a new chart version or with new values
+  - `chart` (`string`) **(required)** - Chart reference to upgrade to (for example: stable/grafana, oci://ghcr.io/nginxinc/charts/nginx-ingress)
+  - `name` (`string`) **(required)** - Name of the Helm release to upgrade
+  - `namespace` (`string`) - Namespace of the Helm release (Optional, current namespace if not provided)
+  - `values` (`object`) - Values to pass to the Helm chart (Optional)
+
 - **helm_list** - List all the Helm releases in the current or provided namespace (or in all namespaces if specified)
   - `all_namespaces` (`boolean`) - If true, lists all Helm releases in all namespaces ignoring the namespace argument (Optional)
   - `namespace` (`string`) - Namespace to list Helm releases from (Optional, all namespaces if not provided)
@@ -624,7 +631,6 @@ In case multi-cluster support is enabled (default) and you have access to multip
   - `namespace` (`string`) - Namespace to uninstall the Helm release from (Optional, current namespace if not provided)
 
 </details>
-
 
 <!-- AVAILABLE-TOOLSETS-TOOLS-END -->
 

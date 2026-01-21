@@ -66,6 +66,37 @@ func (h *Helm) Install(ctx context.Context, chart string, values map[string]inte
 	return string(ret), nil
 }
 
+func (h *Helm) Upgrade(ctx context.Context, chart string, values map[string]interface{}, name string, namespace string) (string, error) {
+	cfg, err := h.newAction(h.kubernetes.NamespaceOrDefault(namespace), false)
+	if err != nil {
+		return "", err
+	}
+	upgrade := action.NewUpgrade(cfg)
+	upgrade.Namespace = h.kubernetes.NamespaceOrDefault(namespace)
+	upgrade.Wait = true
+	upgrade.Timeout = 5 * time.Minute
+	upgrade.Install = false
+
+	chartRequested, err := upgrade.LocateChart(chart, cli.New())
+	if err != nil {
+		return "", err
+	}
+	chartLoaded, err := loader.Load(chartRequested)
+	if err != nil {
+		return "", err
+	}
+
+	upgradedRelease, err := upgrade.RunWithContext(ctx, name, chartLoaded, values)
+	if err != nil {
+		return "", err
+	}
+	ret, err := yaml.Marshal(simplify(upgradedRelease))
+	if err != nil {
+		return "", err
+	}
+	return string(ret), nil
+}
+
 // List lists all the releases for the specified namespace (or current namespace if). Or allNamespaces is true, it lists all releases across all namespaces.
 func (h *Helm) List(namespace string, allNamespaces bool) (string, error) {
 	cfg, err := h.newAction(namespace, allNamespaces)

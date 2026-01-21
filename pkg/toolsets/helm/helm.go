@@ -47,6 +47,39 @@ func initHelm() []api.ServerTool {
 			},
 		}, Handler: helmInstall},
 		{Tool: api.Tool{
+			Name:        "helm_upgrade",
+			Description: "Upgrade an existing Helm release to a new chart version or with new values. The release must already exist - use helm_install to create new releases.",
+			InputSchema: &jsonschema.Schema{
+				Type: "object",
+				Properties: map[string]*jsonschema.Schema{
+					"name": {
+						Type:        "string",
+						Description: "Name of the Helm release to upgrade",
+					},
+					"chart": {
+						Type:        "string",
+						Description: "Chart reference to upgrade to (for example: stable/grafana, oci://ghcr.io/nginxinc/charts/nginx-ingress)",
+					},
+					"values": {
+						Type:        "object",
+						Description: "Values to pass to the Helm chart (Optional)",
+						Properties:  make(map[string]*jsonschema.Schema),
+					},
+					"namespace": {
+						Type:        "string",
+						Description: "Namespace of the Helm release (Optional, current namespace if not provided)",
+					},
+				},
+				Required: []string{"name", "chart"},
+			},
+			Annotations: api.ToolAnnotations{
+				Title:           "Helm: Upgrade",
+				DestructiveHint: ptr.To(false),
+				IdempotentHint:  ptr.To(true),
+				OpenWorldHint:   ptr.To(true),
+			},
+		}, Handler: helmUpgrade},
+		{Tool: api.Tool{
 			Name:        "helm_list",
 			Description: "List all the Helm releases in the current or provided namespace (or in all namespaces if specified)",
 			InputSchema: &jsonschema.Schema{
@@ -147,6 +180,39 @@ func helmInstall(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 	if err != nil {
 		mcplog.HandleK8sError(params.Context, err, "helm install")
 		return api.NewToolCallResult("", fmt.Errorf("failed to install helm chart '%s': %w", chart, err)), nil
+	}
+	return api.NewToolCallResult(ret, err), nil
+}
+
+func helmUpgrade(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
+	var name string
+	ok := false
+	if name, ok = params.GetArguments()["name"].(string); !ok {
+		return api.NewToolCallResult("", fmt.Errorf("failed to upgrade helm release, missing argument name")), nil
+	}
+	var chart string
+	if chart, ok = params.GetArguments()["chart"].(string); !ok {
+		return api.NewToolCallResult("", fmt.Errorf("failed to upgrade helm release, missing argument chart")), nil
+	}
+	values := map[string]interface{}{}
+	if v, ok := params.GetArguments()["values"].(map[string]interface{}); ok {
+		values = v
+	}
+	namespace := ""
+	if v, ok := params.GetArguments()["namespace"].(string); ok {
+		namespace = v
+	}
+
+	// Check if the release exists
+	_, histErr := helm.NewHelm(params).History(name, namespace, 1)
+	if histErr != nil {
+		return api.NewToolCallResult("", fmt.Errorf("failed to upgrade helm release '%s': release not found. Use helm_install to create a new release", name)), nil
+	}
+
+	ret, err := helm.NewHelm(params).Upgrade(params, chart, values, name, namespace)
+	if err != nil {
+		mcplog.HandleK8sError(params.Context, err, "helm upgrade")
+		return api.NewToolCallResult("", fmt.Errorf("failed to upgrade helm release '%s': %w", name, err)), nil
 	}
 	return api.NewToolCallResult(ret, err), nil
 }

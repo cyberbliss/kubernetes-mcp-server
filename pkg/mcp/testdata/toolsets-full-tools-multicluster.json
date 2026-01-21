@@ -187,6 +187,46 @@
   },
   {
     "annotations": {
+      "title": "Helm: Upgrade",
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    },
+    "description": "Upgrade an existing Helm release to a new chart version or with new values. The release must already exist - use helm_install to create new releases.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart": {
+          "description": "Chart reference to upgrade to (for example: stable/grafana, oci://ghcr.io/nginxinc/charts/nginx-ingress)",
+          "type": "string"
+        },
+        "context": {
+          "description": "Optional parameter selecting which context to run the tool in. Defaults to fake-context if not set",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name of the Helm release to upgrade",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Namespace of the Helm release (Optional, current namespace if not provided)",
+          "type": "string"
+        },
+        "values": {
+          "description": "Values to pass to the Helm chart (Optional)",
+          "properties": {},
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "chart"
+      ]
+    },
+    "name": "helm_upgrade"
+  },
+  {
+    "annotations": {
       "title": "Namespaces: List",
       "readOnlyHint": true,
       "destructiveHint": false,
