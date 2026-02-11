@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/suite"
@@ -26,6 +25,7 @@ import (
 
 	"github.com/containers/kubernetes-mcp-server/internal/test"
 	"github.com/containers/kubernetes-mcp-server/pkg/config"
+	internalk8s "github.com/containers/kubernetes-mcp-server/pkg/kubernetes"
 )
 
 // envTest has an expensive setup, so we only want to do it once per entire test run.
@@ -205,9 +205,10 @@ func (s *BaseMcpSuite) TearDownTest() {
 	}
 }
 
-func (s *BaseMcpSuite) InitMcpClient(options ...transport.StreamableHTTPCOption) {
-	var err error
-	s.mcpServer, err = NewServer(Configuration{StaticConfig: s.Cfg}, nil, nil)
+func (s *BaseMcpSuite) InitMcpClient(options ...test.McpClientOption) {
+	provider, err := internalk8s.NewProvider(s.Cfg)
+	s.Require().NoError(err, "Expected no error creating k8s provider")
+	s.mcpServer, err = NewServer(Configuration{StaticConfig: s.Cfg}, provider)
 	s.Require().NoError(err, "Expected no error creating MCP server")
 	s.McpClient = test.NewMcpClient(s.T(), s.mcpServer.ServeHTTP(), options...)
 }

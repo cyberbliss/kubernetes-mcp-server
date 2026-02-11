@@ -35,6 +35,7 @@ A powerful and flexible Kubernetes [Model Context Protocol (MCP)](https://blog.m
   - **Upgrade** an existing Helm release to a new chart version or with new values.
   - **List** Helm releases in all namespaces or in a specific namespace.
   - **Uninstall** a Helm release in the current or provided namespace.
+- **🔭 Observability**: Optional OpenTelemetry distributed tracing and metrics with custom sampling rates. Includes `/stats` endpoint for real-time statistics. See [OTEL.md](docs/OTEL.md).
 
 Unlike other Kubernetes MCP server implementations, this **IS NOT** just a wrapper around `kubectl` or `helm` command-line tools.
 It is a **Go-based native implementation** that interacts directly with the Kubernetes API server.
@@ -190,15 +191,47 @@ uvx kubernetes-mcp-server@latest --help
 |---------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `--port`                  | Starts the MCP server in Streamable HTTP mode (path /mcp) and Server-Sent Event (SSE) (path /sse) mode and listens on the specified port .                                                                                                                                                    |
 | `--log-level`             | Sets the logging level (values [from 0-9](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-instrumentation/logging.md)). Similar to [kubectl logging levels](https://kubernetes.io/docs/reference/kubectl/quick-reference/#kubectl-output-verbosity-and-debugging). |
-| `--config`                | (Optional) Path to the main TOML configuration file. See [Drop-in Configuration](#drop-in-configuration) section below for details.                                                                                                                                                          |
-| `--config-dir`            | (Optional) Path to drop-in configuration directory. Files are loaded in lexical (alphabetical) order. Defaults to `conf.d` relative to the main config file if `--config` is specified. See [Drop-in Configuration](#drop-in-configuration) section below for details.                       |
+| `--config`                | (Optional) Path to the main TOML configuration file. See [Drop-in Configuration](#drop-in-configuration) section below for details.                                                                                                                                                           |
+| `--config-dir`            | (Optional) Path to drop-in configuration directory. Files are loaded in lexical (alphabetical) order. Defaults to `conf.d` relative to the main config file if `--config` is specified. See [Drop-in Configuration](#drop-in-configuration) section below for details.                        |
 | `--kubeconfig`            | Path to the Kubernetes configuration file. If not provided, it will try to resolve the configuration (in-cluster, default location, etc.).                                                                                                                                                    |
 | `--list-output`           | Output format for resource list operations (one of: yaml, table) (default "table")                                                                                                                                                                                                            |
 | `--read-only`             | If set, the MCP server will run in read-only mode, meaning it will not allow any write operations (create, update, delete) on the Kubernetes cluster. This is useful for debugging or inspecting the cluster without making changes.                                                          |
 | `--disable-destructive`   | If set, the MCP server will disable all destructive operations (delete, update, etc.) on the Kubernetes cluster. This is useful for debugging or inspecting the cluster without accidentally making changes. This option has no effect when `--read-only` is used.                            |
-| `--stateless`             | If set, the MCP server will run in stateless mode, disabling tool and prompt change notifications. This is useful for container deployments, load balancing, and serverless environments where maintaining client state is not desired. |
-| `--toolsets`              | Comma-separated list of toolsets to enable. Check the [🛠️ Tools and Functionalities](#tools-and-functionalities) section for more information.                                                                                                                                               |
+| `--stateless`             | If set, the MCP server will run in stateless mode, disabling tool and prompt change notifications. This is useful for container deployments, load balancing, and serverless environments where maintaining client state is not desired.                                                       |
+| `--toolsets`              | Comma-separated list of toolsets to enable. Check the [🛠️ Tools and Functionalities](#tools-and-functionalities) section for more information.                                                                                                                                                |
 | `--disable-multi-cluster` | If set, the MCP server will disable multi-cluster support and will only use the current context from the kubeconfig file. This is useful if you want to restrict the MCP server to a single cluster.                                                                                          |
+| `--cluster-provider`.     | Cluster provider strategy to use (one of: kubeconfig, in-cluster, kcp, disabled). If not set, the server will auto-detect based on the environment.                                                                                                                                           |
+
+### Server Instructions (for MCP Tool Search) <a id="server-instructions"></a>
+
+The `server_instructions` configuration option allows you to provide hints to MCP clients about when to use this server's tools. This is particularly useful for clients that support **MCP Tool Search** (like Claude Code), which dynamically loads tools based on relevance to the user's query.
+
+**How it works:**
+- When an MCP client has many tools available, it may defer loading tool definitions to save context space
+- Server instructions help the client know when to search this server for relevant tools
+- The instructions are matched against user queries to determine tool relevance
+
+**Example TOML configuration:**
+
+```toml
+server_instructions = """
+Use this server for Kubernetes and OpenShift cluster management tasks including:
+- Pods: list, get details, logs, exec commands, delete
+- Resources: get, list, create, update, delete any Kubernetes resource (deployments, services, configmaps, secrets, etc.)
+- Namespaces and projects: list, create, switch context
+- Nodes: list, view logs, get resource usage statistics
+- Events: view cluster events for debugging
+- Helm: install (deploy), upgrade, uninstall, list charts and releases
+- KubeVirt: create and manage virtual machines
+- Cluster config: view and switch kubeconfig contexts
+"""
+```
+
+**Recommended keywords to include:**
+- Resource types: pods, deployments, services, configmaps, secrets, namespaces, nodes
+- Actions: list, get, create, update, delete, logs, exec, scale
+- Tools: Helm, KubeVirt, OpenShift
+- Use cases: debugging, troubleshooting, cluster management
 
 ### Drop-in Configuration <a id="drop-in-configuration"></a>
 
@@ -401,6 +434,7 @@ The following sets of tools are available (toolsets marked with ✓ in the Defau
 |----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
 | config   | View and manage the current local Kubernetes configuration (kubeconfig)                                                                                              | ✓       |
 | core     | Most common tools for Kubernetes management (Pods, Generic Resources, Events, etc.)                                                                                  | ✓       |
+| kcp      | Manage kcp workspaces and multi-tenancy features                                                                                                                     |         |
 | kiali    | Most common tools for managing Kiali, check the [Kiali documentation](https://github.com/containers/kubernetes-mcp-server/blob/main/docs/KIALI.md) for more details. |         |
 | kubevirt | KubeVirt virtual machine management tools                                                                                                                            |         |
 | helm     | Tools for managing Helm charts and releases                                                                                                                          | ✓       |
@@ -430,7 +464,7 @@ In case multi-cluster support is enabled (default) and you have access to multip
 
 <summary>core</summary>
 
-- **events_list** - List all the Kubernetes events in the current cluster from all namespaces
+- **events_list** - List Kubernetes events (warnings, errors, state changes) for debugging and troubleshooting in the current cluster from all namespaces
   - `namespace` (`string`) - Optional Namespace to retrieve the events from. If not provided, will list events from all namespaces
 
 - **namespaces_list** - List all the Kubernetes namespaces in the current cluster
@@ -472,7 +506,7 @@ In case multi-cluster support is enabled (default) and you have access to multip
   - `name` (`string`) - Name of the Pod to get the resource consumption from (Optional, all Pods in the namespace if not provided)
   - `namespace` (`string`) - Namespace to get the Pods resource consumption from (Optional, current namespace if not provided and all_namespaces is false)
 
-- **pods_exec** - Execute a command in a Kubernetes Pod in the current or provided namespace with the provided name and command
+- **pods_exec** - Execute a command in a Kubernetes Pod (shell access, run commands in container) in the current or provided namespace with the provided name and command
   - `command` (`array`) **(required)** - Command to execute in the Pod container. The first item is the command to be run, and the rest are the arguments to that command. Example: ["ls", "-l", "/tmp"]
   - `container` (`string`) - Name of the Pod container where the command will be executed (Optional)
   - `name` (`string`) **(required)** - Name of the Pod where the command will be executed
@@ -513,6 +547,7 @@ In case multi-cluster support is enabled (default) and you have access to multip
 - **resources_delete** - Delete a Kubernetes resource in the current cluster by providing its apiVersion, kind, optionally the namespace, and its name
 (common apiVersion and kind include: v1 Pod, v1 Service, v1 Node, apps/v1 Deployment, networking.k8s.io/v1 Ingress, route.openshift.io/v1 Route)
   - `apiVersion` (`string`) **(required)** - apiVersion of the resource (examples of valid apiVersion are: v1, apps/v1, networking.k8s.io/v1)
+  - `gracePeriodSeconds` (`integer`) - Optional duration in seconds before the object should be deleted. Value must be non-negative integer. The value zero indicates delete immediately. If this value is nil, the default grace period for the specified type will be used
   - `kind` (`string`) **(required)** - kind of the resource (examples of valid kind are: Pod, Service, Deployment, Ingress)
   - `name` (`string`) **(required)** - Name of the resource
   - `namespace` (`string`) - Optional Namespace to delete the namespaced resource from (ignored in case of cluster scoped resources). If not provided, will delete resource from configured namespace
@@ -528,6 +563,17 @@ In case multi-cluster support is enabled (default) and you have access to multip
 
 <details>
 
+<summary>kcp</summary>
+
+- **kcp_workspaces_list** - List all available kcp workspaces in the current cluster
+
+- **kcp_workspace_describe** - Get detailed information about a specific kcp workspace
+  - `workspace` (`string`) **(required)** - Name or path of the workspace to describe
+
+</details>
+
+<details>
+
 <summary>kiali</summary>
 
 - **kiali_mesh_graph** - Returns the topology of a specific namespaces, health, status of the mesh and namespaces. Includes a mesh health summary overview with aggregated counts of healthy, degraded, and failing apps, workloads, and services. Use this for high-level overviews
@@ -536,8 +582,16 @@ In case multi-cluster support is enabled (default) and you have access to multip
   - `namespaces` (`string`) - Optional comma-separated list of namespaces to include in the graph
   - `rateInterval` (`string`) - Optional rate interval for fetching (e.g., '10m', '5m', '1h').
 
-- **kiali_manage_istio_config** - Manages Istio configuration objects (Gateways, VirtualServices, etc.). Can list (objects and validations), get, create, patch, or delete objects
-  - `action` (`string`) **(required)** - Action to perform: list, get, create, patch, or delete
+- **kiali_manage_istio_config_read** - Lists or gets Istio configuration objects (Gateways, VirtualServices, etc.)
+  - `action` (`string`) **(required)** - Action to perform: list or get
+  - `group` (`string`) - API group of the Istio object (e.g., 'networking.istio.io', 'gateway.networking.k8s.io')
+  - `kind` (`string`) - Kind of the Istio object (e.g., 'DestinationRule', 'VirtualService', 'HTTPRoute', 'Gateway')
+  - `name` (`string`) - Name of the Istio object
+  - `namespace` (`string`) - Namespace containing the Istio object
+  - `version` (`string`) - API version of the Istio object (e.g., 'v1', 'v1beta1')
+
+- **kiali_manage_istio_config** - Creates, patches, or deletes Istio configuration objects (Gateways, VirtualServices, etc.)
+  - `action` (`string`) **(required)** - Action to perform: create, patch, or delete
   - `group` (`string`) - API group of the Istio object (e.g., 'networking.istio.io', 'gateway.networking.k8s.io')
   - `json_data` (`string`) - JSON data to apply or create the object
   - `kind` (`string`) - Kind of the Istio object (e.g., 'DestinationRule', 'VirtualService', 'HTTPRoute', 'Gateway')
@@ -593,6 +647,7 @@ In case multi-cluster support is enabled (default) and you have access to multip
   - `instancetype` (`string`) - Optional instance type name for the VM (e.g., 'u1.small', 'u1.medium', 'u1.large')
   - `name` (`string`) **(required)** - The name of the virtual machine
   - `namespace` (`string`) **(required)** - The namespace for the virtual machine
+  - `networks` (`array`) - Optional secondary network interfaces to attach to the VM. Each item specifies a Multus NetworkAttachmentDefinition to attach. Accepts either simple strings (NetworkAttachmentDefinition names) or objects with 'name' (interface name in VM) and 'networkName' (NetworkAttachmentDefinition name) properties. Each network creates a bridge interface on the VM.
   - `performance` (`string`) - Optional performance family hint for the VM instance type (e.g., 'u1' for general-purpose, 'o1' for overcommitted, 'c1' for compute-optimized, 'm1' for memory-optimized). Defaults to 'u1' (general-purpose) if not specified.
   - `preference` (`string`) - Optional preference name for the VM
   - `size` (`string`) - Optional workload size hint for the VM (e.g., 'small', 'medium', 'large', 'xlarge'). Used to auto-select an appropriate instance type if not explicitly specified.
@@ -610,7 +665,7 @@ In case multi-cluster support is enabled (default) and you have access to multip
 
 <summary>helm</summary>
 
-- **helm_install** - Install a Helm chart in the current or provided namespace
+- **helm_install** - Install (deploy) a Helm chart to create a release in the current or provided namespace
   - `chart` (`string`) **(required)** - Chart reference to install (for example: stable/grafana, oci://ghcr.io/nginxinc/charts/nginx-ingress)
   - `name` (`string`) - Name of the Helm release (Optional, random name if not provided)
   - `namespace` (`string`) - Namespace to install the Helm chart in (Optional, current namespace if not provided)
@@ -633,6 +688,33 @@ In case multi-cluster support is enabled (default) and you have access to multip
 </details>
 
 <!-- AVAILABLE-TOOLSETS-TOOLS-END -->
+
+### Prompts
+
+<!-- AVAILABLE-TOOLSETS-PROMPTS-START -->
+
+<details>
+
+<summary>core</summary>
+
+- **cluster-health-check** - Perform comprehensive health assessment of Kubernetes/OpenShift cluster
+  - `namespace` (`string`) - Optional namespace to limit health check scope (default: all namespaces)
+  - `check_events` (`string`) - Include recent warning/error events (true/false, default: true)
+
+</details>
+
+<details>
+
+<summary>kubevirt</summary>
+
+- **vm-troubleshoot** - Generate a step-by-step troubleshooting guide for diagnosing VirtualMachine issues
+  - `namespace` (`string`) **(required)** - The namespace of the VirtualMachine to troubleshoot
+  - `name` (`string`) **(required)** - The name of the VirtualMachine to troubleshoot
+
+</details>
+
+
+<!-- AVAILABLE-TOOLSETS-PROMPTS-END -->
 
 ## Helm Chart
 

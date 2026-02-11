@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/containers/kubernetes-mcp-server/pkg/config"
+	"github.com/containers/kubernetes-mcp-server/pkg/toolsets"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -291,11 +294,15 @@ func TestToolsets(t *testing.T) {
 		rootCmd := NewMCPServer(ioStreams)
 		rootCmd.SetArgs([]string{"--help"})
 		o, err := captureOutput(rootCmd.Execute) // --help doesn't use logger/klog, cobra prints directly to stdout
-		if !strings.Contains(o, "Comma-separated list of MCP toolsets to use (available toolsets: config, core, helm, kiali, kubevirt).") {
+		expected := fmt.Sprintf("Comma-separated list of MCP toolsets to use (available toolsets: %s).", strings.Join(toolsets.ToolsetNames(), ", "))
+		if !strings.Contains(o, expected) {
 			t.Fatalf("Expected all available toolsets, got %s %v", o, err)
 		}
 	})
 	t.Run("default", func(t *testing.T) {
+		if config.HasDefaultOverrides() {
+			t.Skip("Skipping test because default configuration overrides are present (this is a downstream fork)")
+		}
 		ioStreams, out := testStream()
 		rootCmd := NewMCPServer(ioStreams)
 		rootCmd.SetArgs([]string{"--version", "--port=1337", "--log-level=1"})
@@ -347,6 +354,9 @@ func TestListOutput(t *testing.T) {
 
 func TestReadOnly(t *testing.T) {
 	t.Run("defaults to false", func(t *testing.T) {
+		if config.HasDefaultOverrides() {
+			t.Skip("Skipping test because default configuration overrides are present (this is a downstream fork)")
+		}
 		ioStreams, out := testStream()
 		rootCmd := NewMCPServer(ioStreams)
 		rootCmd.SetArgs([]string{"--version", "--port=1337", "--log-level=1"})

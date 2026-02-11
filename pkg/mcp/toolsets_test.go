@@ -11,10 +11,12 @@ import (
 	"github.com/containers/kubernetes-mcp-server/internal/test"
 	"github.com/containers/kubernetes-mcp-server/pkg/api"
 	configuration "github.com/containers/kubernetes-mcp-server/pkg/config"
+	"github.com/containers/kubernetes-mcp-server/pkg/kubernetes"
 	"github.com/containers/kubernetes-mcp-server/pkg/toolsets"
 	"github.com/containers/kubernetes-mcp-server/pkg/toolsets/config"
 	"github.com/containers/kubernetes-mcp-server/pkg/toolsets/core"
 	"github.com/containers/kubernetes-mcp-server/pkg/toolsets/helm"
+	"github.com/containers/kubernetes-mcp-server/pkg/toolsets/kcp"
 	"github.com/containers/kubernetes-mcp-server/pkg/toolsets/kiali"
 	"github.com/containers/kubernetes-mcp-server/pkg/toolsets/kubevirt"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -198,11 +200,41 @@ func (s *ToolsetsSuite) TestInputSchemaEdgeCases() {
 		s.NotNil(namespacesList.InputSchema.Properties, "Expected namespaces_list.InputSchema.Properties not to be nil")
 		s.Empty(namespacesList.InputSchema.Properties, "Expected namespaces_list.InputSchema.Properties to be empty")
 	})
+	// https://github.com/containers/kubernetes-mcp-server/issues/717
+	// Verifies ALL tools have Properties initialized (not just cluster-aware ones)
+	// OpenAI API requires properties field even if empty
+	s.Run("InputSchema has properties for all tools regardless of cluster-awareness", func() {
+		// Register all toolsets including kcp to catch kcp_workspaces_list
+		toolsets.Clear()
+		toolsets.Register(&core.Toolset{})
+		toolsets.Register(&config.Toolset{})
+		toolsets.Register(&helm.Toolset{})
+		toolsets.Register(&kcp.Toolset{})
+		s.Cfg.Toolsets = []string{"core", "config", "helm", "kcp"}
+		// Enable multi-cluster mode to include configuration_contexts_list tool
+		kubeconfig := s.Kubeconfig()
+		kubeconfig.Contexts["extra-cluster"] = clientcmdapi.NewContext()
+		s.Cfg.KubeConfig = test.KubeconfigFile(s.T(), kubeconfig)
+		s.InitMcpClient()
+		tools, err := s.ListTools(s.T().Context(), mcp.ListToolsRequest{})
+		s.Require().NoError(err, "Expected no error from ListTools")
+		s.Require().NotNil(tools, "Expected tools from ListTools")
+		s.Require().NotEmpty(tools.Tools, "Expected at least one tool")
+		// Check each tool has InputSchema.Properties initialized
+		for _, tool := range tools.Tools {
+			s.Run(tool.Name, func() {
+				s.Require().NotNil(tool.InputSchema.Properties,
+					"Expected InputSchema.Properties not to be nil for tool %s (required by OpenAI API)",
+					tool.Name)
+			})
+		}
+	})
 }
 
 func (s *ToolsetsSuite) InitMcpClient() {
-	var err error
-	s.mcpServer, err = NewServer(Configuration{StaticConfig: s.Cfg}, nil, nil)
+	provider, err := kubernetes.NewProvider(s.Cfg)
+	s.Require().NoError(err, "Expected no error creating kubernetes target provider")
+	s.mcpServer, err = NewServer(Configuration{StaticConfig: s.Cfg}, provider)
 	s.Require().NoError(err, "Expected no error creating MCP server")
 	s.McpClient = test.NewMcpClient(s.T(), s.mcpServer.ServeHTTP())
 }

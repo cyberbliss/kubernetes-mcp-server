@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"time"
 
-	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -15,6 +15,7 @@ import (
 	"github.com/containers/kubernetes-mcp-server/pkg/api"
 	"github.com/containers/kubernetes-mcp-server/pkg/config"
 	internalk8s "github.com/containers/kubernetes-mcp-server/pkg/kubernetes"
+	"github.com/containers/kubernetes-mcp-server/pkg/metrics"
 	"github.com/containers/kubernetes-mcp-server/pkg/output"
 	"github.com/containers/kubernetes-mcp-server/pkg/prompts"
 	"github.com/containers/kubernetes-mcp-server/pkg/toolsets"
@@ -61,19 +62,16 @@ func (c *Configuration) isToolApplicable(tool api.ServerTool) bool {
 
 type Server struct {
 	configuration  *Configuration
-	oidcProvider   *oidc.Provider
-	httpClient     *http.Client
 	server         *mcp.Server
 	enabledTools   []string
 	enabledPrompts []string
 	p              internalk8s.Provider
+	metrics        *metrics.Metrics // Metrics collection system
 }
 
-func NewServer(configuration Configuration, oidcProvider *oidc.Provider, httpClient *http.Client) (*Server, error) {
+func NewServer(configuration Configuration, targetProvider internalk8s.Provider) (*Server, error) {
 	s := &Server{
 		configuration: &configuration,
-		oidcProvider:  oidcProvider,
-		httpClient:    httpClient,
 		server: mcp.NewServer(
 			&mcp.Implementation{
 				Name:       version.BinaryName,
@@ -90,17 +88,28 @@ func NewServer(configuration Configuration, oidcProvider *oidc.Provider, httpCli
 				},
 				Instructions: configuration.ServerInstructions,
 			}),
+		p: targetProvider,
 	}
+
+	// Initialize metrics system
+	metricsInstance, err := metrics.New(metrics.Config{
+		TracerName:     version.BinaryName + "/mcp",
+		ServiceName:    version.BinaryName,
+		ServiceVersion: version.Version,
+		Telemetry:      &configuration.Telemetry,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics: %w", err)
+	}
+	s.metrics = metricsInstance
 
 	s.server.AddReceivingMiddleware(sessionInjectionMiddleware)
+	s.server.AddReceivingMiddleware(traceContextPropagationMiddleware)
+	s.server.AddReceivingMiddleware(tracingMiddleware(version.BinaryName + "/mcp"))
 	s.server.AddReceivingMiddleware(authHeaderPropagationMiddleware)
+	s.server.AddReceivingMiddleware(userAgentPropagationMiddleware(version.BinaryName, version.Version))
 	s.server.AddReceivingMiddleware(toolCallLoggingMiddleware)
-
-	var err error
-	s.p, err = internalk8s.NewProvider(s.configuration.StaticConfig)
-	if err != nil {
-		return nil, err
-	}
+	s.server.AddReceivingMiddleware(s.metricsMiddleware())
 	err = s.reloadToolsets()
 	if err != nil {
 		return nil, err
@@ -118,97 +127,158 @@ func (s *Server) reloadToolsets() error {
 		return err
 	}
 
+	// TODO: No option to perform a full replacement of tools.
+	// s.server.SetTools(tools...)
+
+	// Collect applicable items
+	applicableTools := s.collectApplicableTools(targets)
+	applicablePrompts := s.collectApplicablePrompts()
+
+	// Reload tools, and track the newly enabled tools so that we can diff on reload to figure out which to remove (if any)
+	s.enabledTools, err = reloadItems(
+		s.enabledTools,
+		applicableTools,
+		func(t api.ServerTool) string { return t.Tool.Name },
+		s.server.RemoveTools,
+		s.registerTool,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Reload prompts, and track the newly enabled prompts so that we can diff on reload to figure out which to remove (if any)
+	s.enabledPrompts, err = reloadItems(
+		s.enabledPrompts,
+		applicablePrompts,
+		func(p api.ServerPrompt) string { return p.Prompt.Name },
+		s.server.RemovePrompts,
+		s.registerPrompt,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Start new watch
+	s.p.WatchTargets(s.reloadToolsets)
+	return nil
+}
+
+// reloadItems handles the common pattern of reloading MCP server items.
+// It removes items that are no longer applicable, registers new items,
+// and returns the updated list of enabled item names.
+func reloadItems[T any](
+	previous []string,
+	items []T,
+	getName func(T) string,
+	remove func(...string),
+	register func(T) error,
+) ([]string, error) {
+	// Build new enabled list
+	enabled := make([]string, 0, len(items))
+	for _, item := range items {
+		enabled = append(enabled, getName(item))
+	}
+
+	// Remove items that are no longer applicable
+	toRemove := make([]string, 0)
+	for _, old := range previous {
+		if !slices.Contains(enabled, old) {
+			toRemove = append(toRemove, old)
+		}
+	}
+	remove(toRemove...)
+
+	// Register all items
+	for _, item := range items {
+		if err := register(item); err != nil {
+			return nil, err
+		}
+	}
+
+	return enabled, nil
+}
+
+// collectApplicableTools returns tools after applying filtering and mutation
+func (s *Server) collectApplicableTools(targets []string) []api.ServerTool {
 	filter := CompositeFilter(
 		s.configuration.isToolApplicable,
 		ShouldIncludeTargetListTool(s.p.GetTargetParameterName(), targets),
 	)
-
 	mutator := ComposeMutators(
 		WithTargetParameter(s.p.GetDefaultTarget(), s.p.GetTargetParameterName(), targets),
 		WithTargetListTool(s.p.GetDefaultTarget(), s.p.GetTargetParameterName(), targets),
 	)
 
-	// TODO: No option to perform a full replacement of tools.
-	// s.server.SetTools(m3labsServerTools...)
-
-	// Track previously enabled tools
-	previousTools := s.enabledTools
-
-	// Build new list of applicable tools
-	applicableTools := make([]api.ServerTool, 0)
-	s.enabledTools = make([]string, 0)
+	tools := make([]api.ServerTool, 0)
 	for _, toolset := range s.configuration.Toolsets() {
 		for _, tool := range toolset.GetTools(s.p) {
-			tool := mutator(tool)
-			if !filter(tool) {
-				continue
+			tool = mutator(tool)
+			if filter(tool) {
+				tools = append(tools, tool)
 			}
-
-			applicableTools = append(applicableTools, tool)
-			s.enabledTools = append(s.enabledTools, tool.Tool.Name)
 		}
 	}
+	return tools
+}
 
-	// TODO: No option to perform a full replacement of tools.
-	// Remove tools that are no longer applicable
-	toolsToRemove := make([]string, 0)
-	for _, oldTool := range previousTools {
-		if !slices.Contains(s.enabledTools, oldTool) {
-			toolsToRemove = append(toolsToRemove, oldTool)
-		}
-	}
-	s.server.RemoveTools(toolsToRemove...)
-
-	for _, tool := range applicableTools {
-		goSdkTool, goSdkToolHandler, err := ServerToolToGoSdkTool(s, tool)
-		if err != nil {
-			return fmt.Errorf("failed to convert tool %s: %w", tool.Tool.Name, err)
-		}
-		s.server.AddTool(goSdkTool, goSdkToolHandler)
-	}
-
-	// Track previously enabled prompts
-	previousPrompts := s.enabledPrompts
-
-	// Build and register prompts from all toolsets
+// collectApplicablePrompts returns prompts after merging toolset and config prompts
+func (s *Server) collectApplicablePrompts() []api.ServerPrompt {
 	toolsetPrompts := make([]api.ServerPrompt, 0)
-	// Load embedded toolset prompts
 	for _, toolset := range s.configuration.Toolsets() {
 		toolsetPrompts = append(toolsetPrompts, toolset.GetPrompts()...)
 	}
-
 	configPrompts := prompts.ToServerPrompts(s.configuration.Prompts)
+	return prompts.MergePrompts(toolsetPrompts, configPrompts)
+}
 
-	// Merge: config prompts override embedded prompts with same name
-	applicablePrompts := prompts.MergePrompts(toolsetPrompts, configPrompts)
-
-	// Update enabled prompts list
-	s.enabledPrompts = make([]string, 0)
-	for _, prompt := range applicablePrompts {
-		s.enabledPrompts = append(s.enabledPrompts, prompt.Prompt.Name)
+// registerTool converts and registers a tool with the MCP server
+func (s *Server) registerTool(tool api.ServerTool) error {
+	goSdkTool, goSdkToolHandler, err := ServerToolToGoSdkTool(s, tool)
+	if err != nil {
+		return fmt.Errorf("failed to convert tool %s: %w", tool.Tool.Name, err)
 	}
-
-	// Remove prompts that are no longer applicable
-	promptsToRemove := make([]string, 0)
-	for _, oldPrompt := range previousPrompts {
-		if !slices.Contains(s.enabledPrompts, oldPrompt) {
-			promptsToRemove = append(promptsToRemove, oldPrompt)
-		}
-	}
-	s.server.RemovePrompts(promptsToRemove...)
-
-	// Register all applicable prompts
-	for _, prompt := range applicablePrompts {
-		mcpPrompt, promptHandler, err := ServerPromptToGoSdkPrompt(s, prompt)
-		if err != nil {
-			return fmt.Errorf("failed to convert prompt %s: %w", prompt.Prompt.Name, err)
-		}
-		s.server.AddPrompt(mcpPrompt, promptHandler)
-	}
-
-	// start new watch
-	s.p.WatchTargets(s.reloadToolsets)
+	s.server.AddTool(goSdkTool, goSdkToolHandler)
 	return nil
+}
+
+// registerPrompt converts and registers a prompt with the MCP server
+func (s *Server) registerPrompt(prompt api.ServerPrompt) error {
+	mcpPrompt, promptHandler, err := ServerPromptToGoSdkPrompt(s, prompt)
+	if err != nil {
+		return fmt.Errorf("failed to convert prompt %s: %w", prompt.Prompt.Name, err)
+	}
+	s.server.AddPrompt(mcpPrompt, promptHandler)
+	return nil
+}
+
+// metricsMiddleware returns a metrics middleware with access to the server's metrics system
+func (s *Server) metricsMiddleware() func(mcp.MethodHandler) mcp.MethodHandler {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			start := time.Now()
+			result, err := next(ctx, method, req)
+			duration := time.Since(start)
+
+			toolName := method
+			if method == "tools/call" {
+				if params, ok := req.GetParams().(*mcp.CallToolParamsRaw); ok {
+					if toolReq, _ := GoSdkToolCallParamsToToolCallRequest(params); toolReq != nil {
+						toolName = toolReq.Name
+					}
+				}
+			}
+
+			// Record to all collectors
+			s.metrics.RecordToolCall(ctx, toolName, duration, err)
+
+			return result, err
+		}
+	}
+}
+
+// GetMetrics returns the metrics system for use by the HTTP server.
+func (s *Server) GetMetrics() *metrics.Metrics {
+	return s.metrics
 }
 
 func (s *Server) ServeStdio(ctx context.Context) error {
@@ -278,6 +348,17 @@ func (s *Server) Close() {
 	if s.p != nil {
 		s.p.Close()
 	}
+}
+
+// Shutdown gracefully shuts down the server, flushing any pending metrics.
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.metrics != nil {
+		if err := s.metrics.Shutdown(ctx); err != nil {
+			return fmt.Errorf("failed to shutdown metrics: %w", err)
+		}
+	}
+	s.Close()
+	return nil
 }
 
 func NewTextResult(content string, err error) *mcp.CallToolResult {

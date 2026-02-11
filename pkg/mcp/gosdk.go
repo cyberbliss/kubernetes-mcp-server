@@ -7,12 +7,18 @@ import (
 	"fmt"
 
 	"github.com/containers/kubernetes-mcp-server/pkg/api"
-	"github.com/containers/kubernetes-mcp-server/pkg/kubernetes"
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"k8s.io/utils/ptr"
 )
 
 func ServerToolToGoSdkTool(s *Server, tool api.ServerTool) (*mcp.Tool, mcp.ToolHandler, error) {
+	// Ensure InputSchema.Properties is initialized for OpenAI API compatibility
+	// https://github.com/containers/kubernetes-mcp-server/issues/717
+	inputSchema := tool.Tool.InputSchema
+	if inputSchema != nil && inputSchema.Properties == nil {
+		inputSchema.Properties = make(map[string]*jsonschema.Schema)
+	}
 	goSdkTool := &mcp.Tool{
 		Name:        tool.Tool.Name,
 		Description: tool.Tool.Description,
@@ -24,7 +30,7 @@ func ServerToolToGoSdkTool(s *Server, tool api.ServerTool) (*mcp.Tool, mcp.ToolH
 			IdempotentHint:  ptr.Deref(tool.Tool.Annotations.IdempotentHint, false),
 			OpenWorldHint:   tool.Tool.Annotations.OpenWorldHint,
 		},
-		InputSchema: tool.Tool.InputSchema,
+		InputSchema: inputSchema,
 	}
 	goSdkHandler := func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		toolCallRequest, err := GoSdkToolCallRequestToToolCallRequest(request)
@@ -33,7 +39,6 @@ func ServerToolToGoSdkTool(s *Server, tool api.ServerTool) (*mcp.Tool, mcp.ToolH
 		}
 		// get the correct derived Kubernetes client for the target specified in the request
 		cluster := toolCallRequest.GetString(s.p.GetTargetParameterName(), s.p.GetDefaultTarget())
-		ctx = kubernetes.ExchangeTokenInContext(ctx, s.configuration.StaticConfig, s.oidcProvider, s.httpClient, s.p, cluster)
 		k, err := s.p.GetDerivedKubernetes(ctx, cluster)
 		if err != nil {
 			return nil, err

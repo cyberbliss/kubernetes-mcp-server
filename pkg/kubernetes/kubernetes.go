@@ -24,6 +24,7 @@ type HeaderKey string
 const (
 	CustomAuthorizationHeader = HeaderKey("kubernetes-authorization")
 	OAuthAuthorizationHeader  = HeaderKey("Authorization")
+	UserAgentHeader           = HeaderKey("User-Agent")
 
 	CustomUserAgent = "kubernetes-mcp-server/bearer-token-auth"
 )
@@ -62,8 +63,11 @@ func NewKubernetes(config api.BaseConfig, clientCmdConfig clientcmd.ClientConfig
 		return &AccessControlRoundTripper{
 			delegate:                original,
 			deniedResourcesProvider: config,
-			restMapper:              k.restMapper,
+			restMapperProvider:      func() meta.RESTMapper { return k.restMapper },
 		}
+	})
+	k.restConfig.Wrap(func(original http.RoundTripper) http.RoundTripper {
+		return &UserAgentRoundTripper{delegate: original}
 	})
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(k.restConfig)
 	if err != nil {
